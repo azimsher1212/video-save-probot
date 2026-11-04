@@ -26,6 +26,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    BotCommand,
+    InputProfilePhotoStatic,
     ReactionTypeEmoji,
 )
 from aiogram.utils.media_group import MediaGroupBuilder
@@ -528,6 +530,36 @@ async def on_other(m: Message):
     await m.answer("🔗 Menga video yoki rasm <b>havolasini</b> yuboring — bir zumda yuklab beraman ⚡")
 
 
+# ---------- Bot profilini avtomatik sozlash ----------
+BOT_NAME = "Forward Save"
+BOT_ABOUT = "Rasm/videolarni musiqasi bilan yuklab beraman 📥 Insta · YouTube · TikTok · Pinterest 👨‍💻 " + ADMIN
+BOT_DESCRIPTION = (
+    "Insta, YouTube, TikTok, Pinterest, SnapChat, Facebook tarmoqlaridan "
+    "rasm/videolarni musiqasi bilan yuklab beraman📥\n\n"
+    "⚡ Tez  💎 1080p HD  🎶 MP3  🆓 Bepul\n\n"
+    f"👨‍💻: {ADMIN}"
+)
+AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
+
+
+async def setup_profile(bot: Bot) -> None:
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start", description="🚀 Botni ishga tushirish"),
+            BotCommand(command="help", description="📖 Qanday ishlatiladi"),
+        ])
+        await bot.set_my_description(description=BOT_DESCRIPTION)
+        await bot.set_my_short_description(short_description=BOT_ABOUT[:120])
+        current = await bot.get_my_name()
+        if current.name != BOT_NAME:
+            await bot.set_my_name(name=BOT_NAME)
+            if AVATAR_IMG.exists():
+                await bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=FSInputFile(AVATAR_IMG)))
+            log.info("Bot profili yangilandi: nom, rasm, tavsif")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Profilni sozlab bo'lmadi: %s", e)
+
+
 # ---------- Ishga tushirish ----------
 async def health(_request):
     return web.Response(text="Forward Save bot ishlayapti ✅")
@@ -545,6 +577,7 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
     await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(setup_profile(bot))
     log.info("Bot ishga tushdi")
     await dp.start_polling(bot)
 
