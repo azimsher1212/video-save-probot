@@ -361,9 +361,43 @@ BRAND_TEXT = (
     "💎 Ishonchli tanlov\n"
     "💸 Eng maqbul narxlar\n"
     "🚚 🇺🇿 bo‘ylab yetkazib berish\n\n"
-    "📱 <a href=\"tel:+998945650779\">+998 94 565 07 79</a>\n"
-    "📱 <a href=\"tel:+998934069707\">+998 93 406 97 07</a>"
+    "📱 +998945650779\n"
+    "📱 +998934069707\n\n"
+    f'📸 <a href="{BRAND_IG}">Instagram</a>  |  ✈️ <a href="{BRAND_TG}">Telegram</a>  |  ▶️ <a href="{BRAND_YT}">YouTube</a>'
 )
+
+# Kanal postlariga avtomatik imzo
+BRAND_CHANNELS = {c.strip().lstrip("@").lower() for c in os.getenv("BRAND_CHANNELS", "forwardtowardsdreams").split(",") if c.strip()}
+SIGN_MARK = "FORWARD® | Premium Brand"
+SIGNATURE = (
+    "\n\n━━━━━━━━━━━━━━━\n"
+    f"🌐 <b>{SIGN_MARK}</b>\n"
+    "📱 +998945650779\n"
+    "📱 +998934069707\n"
+    f'📸 <a href="{BRAND_IG}">Instagram</a>  |  ✈️ <a href="{BRAND_TG}">Telegram</a>  |  ▶️ <a href="{BRAND_YT}">YouTube</a>'
+)
+
+
+@dp.channel_post()
+async def on_channel_post(post: Message):
+    """Brend kanalidagi har bir yangi post ostiga imzo qo'shadi (bot kanalda admin bo'lishi kerak)."""
+    if (post.chat.username or "").lower() not in BRAND_CHANNELS:
+        return
+    try:
+        if post.text is not None:
+            body = post.html_text
+            if SIGN_MARK in (post.text or "") or len(post.text) + 220 > 4096:
+                return
+            await post.edit_text(body + SIGNATURE, disable_web_page_preview=True)
+        elif post.caption is not None or (post.photo or post.video or post.document or post.audio or post.animation):
+            if post.media_group_id and not post.caption:
+                return  # albomda imzo faqat matnli birinchi rasmga qo'yiladi
+            body = post.html_text if post.caption else ""
+            if SIGN_MARK in (post.caption or "") or len(post.caption or "") + 220 > 1024:
+                return
+            await post.edit_caption(caption=(body + SIGNATURE).lstrip("\n"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Kanal postiga imzo qo'yib bo'lmadi: %s", e)
 
 
 def brand_kb() -> InlineKeyboardMarkup:
