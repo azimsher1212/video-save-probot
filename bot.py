@@ -1,14 +1,16 @@
 """
 Video Save ProBot
-Instagram, YouTube, TikTok, Snapchat, Facebook dan rasm/videolarni
+Instagram, YouTube, TikTok, Pinterest, Snapchat, Facebook dan rasm/videolarni
 musiqasi bilan yuklab beruvchi Telegram bot.
 👨‍💻 @azimsher
 """
 import asyncio
+import html
 import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReactionTypeEmoji,
 )
 from aiogram.utils.media_group import MediaGroupBuilder
 
@@ -33,7 +36,7 @@ log = logging.getLogger("probot")
 # ---------- Sozlamalar ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN = os.getenv("ADMIN_USERNAME", "@azimsher")
-COOKIES = os.getenv("COOKIES_FILE")  # ixtiyoriy: cookies.txt yo'li (Instagram/YouTube uchun)
+COOKIES = os.getenv("COOKIES_FILE")  # ixtiyoriy: cookies.txt yo'li
 PORT = int(os.getenv("PORT", "8080"))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "3"))
 MAX_BYTES = 49 * 1024 * 1024  # Telegram Bot API limiti ~50 MB
@@ -46,30 +49,51 @@ SITES = {
     "youtube.com": "YouTube",
     "youtu.be": "YouTube",
     "tiktok.com": "TikTok",
+    "pinterest.com": "Pinterest",
+    "pin.it": "Pinterest",
     "snapchat.com": "Snapchat",
     "facebook.com": "Facebook",
     "fb.watch": "Facebook",
     "fb.com": "Facebook",
-    "pinterest.com": "Pinterest",
-    "pin.it": "Pinterest",
 }
+SITE_EMOJI = {
+    "Instagram": "📸",
+    "YouTube": "▶️",
+    "TikTok": "🎵",
+    "Pinterest": "📌",
+    "Snapchat": "👻",
+    "Facebook": "📘",
+}
+# Bu saytlarda ko'pincha rasm bo'ladi — avval rasm yuklovchini ishlatamiz (tezroq)
+GALLERY_FIRST = {"Pinterest"}
+
 URL_RE = re.compile(r"https?://[^\s]+")
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 AUDIO_EXT = {".mp3", ".m4a", ".opus", ".ogg", ".aac"}
 
-links: dict[str, str] = {}  # callback uchun qisqa kalit -> havola
+links: dict[str, str] = {}  # callback kaliti -> havola
+cache: dict[str, dict] = {}  # havola -> {"items": [(tur, file_id)], "cap": str}
 sem = asyncio.Semaphore(MAX_PARALLEL)
 dp = Dispatcher()
 
-START_TEXT = (
-    "👋 <b>Assalomu alaykum!</b>\n\n"
-    "Men <b>Instagram, YouTube, TikTok, Pinterest, Snapchat, Facebook</b> tarmoqlaridan "
-    "rasm/videolarni musiqasi bilan yuklab beraman 📥\n\n"
-    "🔗 Menga havolani yuboring — qolganini o'zim qilaman.\n"
-    "🎵 Video ostidagi tugma orqali musiqasini MP3 qilib olasiz.\n\n"
-    f"👨‍💻: {ADMIN}"
-)
+
+# ---------- Matnlar ----------
+def start_text(name: str) -> str:
+    return (
+        f"👋 <b>Salom, {html.escape(name)}!</b>\n\n"
+        "Men — <b>Video Save ProBot</b> ⚡\n"
+        "Rasm va videolarni <b>musiqasi bilan</b> bir zumda yuklab beraman 📥\n\n"
+        "📸 Instagram  ▶️ YouTube  🎵 TikTok\n"
+        "📌 Pinterest  👻 Snapchat  📘 Facebook\n\n"
+        "🔗 <b>Havolani yuboring — qolganini o'zim qilaman!</b>\n"
+        "🎶 Video ostidagi tugma orqali musiqasini MP3 qilib olasiz.\n\n"
+        f"👨‍💻 {ADMIN}"
+    )
+
+
+def bot_link(username: str) -> str:
+    return f"https://t.me/{username}?startgroup=true"
 
 
 # ---------- Yordamchi funksiyalar ----------
@@ -84,6 +108,13 @@ def detect_site(url: str) -> str | None:
     return None
 
 
+def cache_key(url: str) -> str:
+    # Instagram/TikTok havolalaridagi ?igsh=... kabi qo'shimchalarni olib tashlaymiz
+    if "youtube.com/watch" in url:
+        return url
+    return url.split("?")[0].rstrip("/")
+
+
 def ydl_opts(folder: Path, audio: bool) -> dict:
     opts = {
         "outtmpl": str(folder / "%(id)s.%(ext)s"),
@@ -91,8 +122,10 @@ def ydl_opts(folder: Path, audio: bool) -> dict:
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
-        "socket_timeout": 30,
-        "retries": 3,
+        "socket_timeout": 20,
+        "retries": 2,
+        "extractor_retries": 1,
+        "concurrent_fragment_downloads": 4,
     }
     if COOKIES and Path(COOKIES).exists():
         opts["cookiefile"] = COOKIES
@@ -102,48 +135,14 @@ def ydl_opts(folder: Path, audio: bool) -> dict:
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
         ]
     else:
-        # 720p gacha, ovozi bilan birga (Telegram limitiga sig'ishi uchun)
+        # Birlashtirish shart bo'lmagan tayyor mp4 — eng tez variant
         opts["format"] = (
-            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/"
+            "b[height<=720][ext=mp4]/"
+            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
             "bv*[height<=720]+ba/b[height<=720]/b"
         )
         opts["merge_output_format"] = "mp4"
     return opts
-
-
-async def run_gallery_dl(url: str, folder: Path) -> None:
-    """Rasmli postlar (Instagram karusel, TikTok slayd) uchun zaxira yuklovchi."""
-    cmd = ["gallery-dl", "-D", str(folder), "--quiet"]
-    if COOKIES and Path(COOKIES).exists():
-        cmd += ["--cookies", COOKIES]
-    cmd.append(url)
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        _, err = await asyncio.wait_for(proc.communicate(), timeout=180)
-        if proc.returncode:
-            log.warning("gallery-dl: %s", err.decode(errors="ignore")[:300])
-    except asyncio.TimeoutError:
-        proc.kill()
-
-
-async def download(url: str, audio: bool = False) -> Path:
-    folder = DL_ROOT / uuid.uuid4().hex
-    folder.mkdir()
-
-    def _yt():
-        with yt_dlp.YoutubeDL(ydl_opts(folder, audio)) as ydl:
-            ydl.download([url])
-
-    try:
-        await asyncio.wait_for(asyncio.to_thread(_yt), timeout=300)
-    except Exception as e:  # noqa: BLE001
-        log.warning("yt-dlp xatosi (%s): %s", url, e)
-
-    if not audio and not any(collect(folder)):
-        await run_gallery_dl(url, folder)
-    return folder
 
 
 def collect(folder: Path) -> tuple[list[Path], list[Path], list[Path]]:
@@ -154,84 +153,172 @@ def collect(folder: Path) -> tuple[list[Path], list[Path], list[Path]]:
     return videos, images, audios
 
 
-def music_kb(url: str) -> InlineKeyboardMarkup:
-    if len(links) > 5000:
-        links.clear()
-    key = uuid.uuid4().hex[:12]
-    links[key] = url
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🎵 Musiqasini yuklash", callback_data=f"mp3:{key}")]]
+def has_files(folder: Path) -> bool:
+    return any(collect(folder))
+
+
+async def run_gallery_dl(url: str, folder: Path) -> None:
+    cmd = ["gallery-dl", "-D", str(folder), "--quiet"]
+    if COOKIES and Path(COOKIES).exists():
+        cmd += ["--cookies", COOKIES]
+    cmd.append(url)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
     )
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode:
+            log.warning("gallery-dl: %s", err.decode(errors="ignore")[:300])
+    except asyncio.TimeoutError:
+        proc.kill()
 
 
-async def caption(bot: Bot) -> str:
-    me = await bot.me()
-    return f"📥 @{me.username} orqali yuklandi"
+async def run_ytdlp(url: str, folder: Path, audio: bool) -> dict:
+    def _yt():
+        with yt_dlp.YoutubeDL(ydl_opts(folder, audio)) as ydl:
+            return ydl.extract_info(url, download=True) or {}
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_yt), timeout=240)
+    except Exception as e:  # noqa: BLE001
+        log.warning("yt-dlp xatosi (%s): %s", url, str(e)[:200])
+        return {}
 
 
-async def send_media(m: Message, folder: Path, url: str) -> bool:
-    videos, images, audios = collect(folder)
-    too_big = [f for f in videos + images + audios if f.stat().st_size > MAX_BYTES]
-    videos = [f for f in videos if f not in too_big]
-    images = [f for f in images if f not in too_big]
-    audios = [f for f in audios if f not in too_big]
+async def download(url: str, site: str, audio: bool = False) -> tuple[Path, dict]:
+    folder = DL_ROOT / uuid.uuid4().hex
+    folder.mkdir()
+    info: dict = {}
 
-    if too_big and not (videos or images or audios):
-        await m.answer("⚠️ Fayl hajmi 50 MB dan katta — Telegram bunday faylni botga yuborishga ruxsat bermaydi.")
-        return True
+    if not audio and site in GALLERY_FIRST:
+        await run_gallery_dl(url, folder)
+        if has_files(folder):
+            return folder, info
 
-    cap = await caption(m.bot)
-    kb = music_kb(url) if videos else None
-    media = videos + images
-    if not media and not audios:
-        return False
+    info = await run_ytdlp(url, folder, audio)
+    if not audio and not has_files(folder) and site not in GALLERY_FIRST:
+        await run_gallery_dl(url, folder)
+    return folder, info
 
-    await m.bot.send_chat_action(m.chat.id, ChatAction.UPLOAD_VIDEO if videos else ChatAction.UPLOAD_PHOTO)
 
-    async def send_one(f: Path, with_cap: bool, markup=None):
-        c = cap if with_cap else None
-        if f.suffix.lower() in VIDEO_EXT:
-            await m.answer_video(FSInputFile(f), caption=c, reply_markup=markup, supports_streaming=True)
+def build_caption(site: str, info: dict, username: str, seconds: float | None) -> str:
+    lines = []
+    title = (info.get("title") or info.get("description") or "").strip().split("\n")[0]
+    if title and title.lower() not in {"video", "pin", "instagram", "tiktok"}:
+        lines.append(f"🎬 <b>{html.escape(title[:120])}</b>")
+    author = info.get("uploader") or info.get("channel") or info.get("creator")
+    if author:
+        lines.append(f"👤 {html.escape(str(author)[:60])}")
+    meta = f"{SITE_EMOJI.get(site, '🌐')} {site}"
+    if seconds is not None:
+        meta += f"  •  ⚡ {seconds:.1f} soniyada"
+    lines.append(meta)
+    lines.append("")
+    lines.append(f"📥 @{username} — tez, bepul, reklamasiz")
+    return "\n".join(lines)
+
+
+def action_kb(url: str | None, username: str) -> InlineKeyboardMarkup:
+    rows = []
+    if url:
+        if len(links) > 5000:
+            links.clear()
+        key = uuid.uuid4().hex[:12]
+        links[key] = url
+        rows.append([InlineKeyboardButton(text="🎶 Musiqasini yuklash (MP3)", callback_data=f"mp3:{key}")])
+    rows.append([InlineKeyboardButton(text="➕ Botni guruhga qo'shish", url=bot_link(username))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def react(m: Message, emoji: str) -> None:
+    try:
+        await m.react([ReactionTypeEmoji(emoji=emoji)])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def set_status(status: Message, text: str) -> None:
+    try:
+        await status.edit_text(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def keep_action(bot: Bot, chat_id: int, action: ChatAction, stop: asyncio.Event) -> None:
+    """Yuklash davomida 'video yuborilmoqda...' belgisini ko'rsatib turadi."""
+    while not stop.is_set():
+        try:
+            await bot.send_chat_action(chat_id, action)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=4.5)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def send_items(m: Message, items: list[tuple[str, object]], cap: str, kb) -> list[tuple[str, str]]:
+    """items: [(tur, FSInputFile yoki file_id)] — yuborib, file_id larni qaytaradi."""
+    out: list[tuple[str, str]] = []
+    visual = [it for it in items if it[0] in ("video", "photo")]
+    audios = [it for it in items if it[0] == "audio"]
+
+    async def one(kind, media, c, markup):
+        if kind == "video":
+            r = await m.reply_video(media, caption=c, reply_markup=markup, supports_streaming=True)
+            out.append(("video", r.video.file_id))
         else:
-            await m.answer_photo(FSInputFile(f), caption=c, reply_markup=markup)
+            r = await m.reply_photo(media, caption=c, reply_markup=markup)
+            out.append(("photo", r.photo[-1].file_id))
 
-    if len(media) == 1:
-        await send_one(media[0], True, kb)
-    elif media:
-        for i in range(0, len(media), 10):
-            chunk = media[i : i + 10]
+    if len(visual) == 1:
+        await one(*visual[0], cap, kb)
+    elif visual:
+        for i in range(0, len(visual), 10):
+            chunk = visual[i : i + 10]
             if len(chunk) == 1:
-                await send_one(chunk[0], i == 0)
+                await one(*chunk[0], cap if i == 0 else None, None)
                 continue
             group = MediaGroupBuilder(caption=cap if i == 0 else None)
-            for f in chunk:
-                if f.suffix.lower() in VIDEO_EXT:
-                    group.add_video(media=FSInputFile(f), supports_streaming=True)
+            for kind, media in chunk:
+                if kind == "video":
+                    group.add_video(media=media, supports_streaming=True)
                 else:
-                    group.add_photo(media=FSInputFile(f))
-            await m.answer_media_group(group.build())
-        if kb:
-            await m.answer("🎵 Musiqasini ham yuklab olasizmi?", reply_markup=kb)
+                    group.add_photo(media=media)
+            msgs = await m.reply_media_group(group.build())
+            for r in msgs:
+                out.append(("video", r.video.file_id) if r.video else ("photo", r.photo[-1].file_id))
+        await m.answer("👆 Tayyor! Yana nima qilamiz?", reply_markup=kb)
 
-    for a in audios:
-        await m.answer_audio(FSInputFile(a), caption=cap)
-    return True
+    for _, media in audios:
+        r = await m.reply_audio(media, caption=cap)
+        out.append(("audio", r.audio.file_id))
+    return out
 
 
 # ---------- Handlerlar ----------
 @dp.message(CommandStart())
 async def on_start(m: Message):
-    await m.answer(START_TEXT)
+    me = await m.bot.me()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Guruhga qo'shish", url=bot_link(me.username))],
+            [InlineKeyboardButton(text="👨‍💻 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN.lstrip('@')}")],
+        ]
+    )
+    await m.answer(start_text(m.from_user.first_name if m.from_user else "do'stim"), reply_markup=kb)
 
 
 @dp.message(Command("help"))
 async def on_help(m: Message):
     await m.answer(
-        "📌 <b>Qanday ishlatiladi:</b>\n"
-        "1. Instagram / YouTube / TikTok / Pinterest / Snapchat / Facebook dan havolani nusxalang\n"
-        "2. Shu yerga yuboring\n"
-        "3. Video yoki rasmlarni oling, xohlasangiz 🎵 tugma bilan MP3 ham\n\n"
-        f"Savollar bo'yicha: {ADMIN}"
+        "📖 <b>Qanday ishlatiladi?</b>\n\n"
+        "1️⃣ Ilovada postni oching → <b>Ulashish</b> → <b>Havolani nusxalash</b>\n"
+        "2️⃣ Havolani shu yerga yuboring\n"
+        "3️⃣ Bir necha soniyada video yoki rasm tayyor ✅\n"
+        "4️⃣ 🎶 tugma bilan musiqasini MP3 qilib oling\n\n"
+        "👥 Guruhlarda ham ishlayman — meni guruhga qo'shing!\n\n"
+        f"❓ Savollar: {ADMIN}"
     )
 
 
@@ -242,26 +329,75 @@ async def on_link(m: Message):
     if not site:
         if m.chat.type != "private":
             return  # guruhlarda boshqa havolalarga jim turamiz
-        await m.answer("❌ Bu sayt qo'llab-quvvatlanmaydi.\nInstagram, YouTube, TikTok, Pinterest, Snapchat yoki Facebook havolasini yuboring.")
+        await m.answer(
+            "🤔 Bu saytni hali tanimayman.\n\n"
+            "Men bilan ishlaydiganlar:\n📸 Instagram  ▶️ YouTube  🎵 TikTok\n📌 Pinterest  👻 Snapchat  📘 Facebook"
+        )
         return
 
-    status = await m.answer(f"⏳ {site} dan yuklanmoqda, biroz kuting...")
+    me = await m.bot.me()
+    key = cache_key(url)
+    await react(m, "👀")
+
+    # ⚡ Avval yuklangan bo'lsa — darhol yuboramiz
+    if key in cache:
+        c = cache[key]
+        has_video = any(k == "video" for k, _ in c["items"])
+        try:
+            await send_items(m, c["items"], c["cap"], action_kb(url if has_video else None, me.username))
+            await react(m, "⚡")
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("Keshdan yuborib bo'lmadi: %s", e)
+            cache.pop(key, None)
+
+    emoji = SITE_EMOJI.get(site, "🌐")
+    status = await m.reply(f"{emoji} <b>{site}</b> havolasi qabul qilindi\n⏳ Yuklanmoqda...")
+    stop = asyncio.Event()
+    typing = asyncio.create_task(keep_action(m.bot, m.chat.id, ChatAction.UPLOAD_VIDEO, stop))
     folder = None
+    t0 = time.monotonic()
     try:
         async with sem:
-            folder = await download(url)
-            ok = await send_media(m, folder, url)
-        if not ok:
-            await m.answer(
-                "😔 Yuklab bo'lmadi. Sabablari bo'lishi mumkin:\n"
-                "• post yopiq (private) yoki o'chirilgan\n"
-                "• havola noto'g'ri\n"
-                "Boshqa havola bilan urinib ko'ring."
-            )
+            folder, info = await download(url, site)
+            videos, images, audios = collect(folder)
+            files = [f for f in videos + images + audios if f.stat().st_size <= MAX_BYTES]
+            too_big = len(videos + images + audios) - len(files)
+
+            if not files:
+                stop.set()
+                await react(m, "😢")
+                if too_big:
+                    await m.reply("📦 Fayl juda katta (50 MB dan ortiq) — Telegram buni botlarga ruxsat bermaydi.")
+                else:
+                    await m.reply(
+                        "😔 <b>Yuklab bo'lmadi.</b>\n\n"
+                        "Ehtimol:\n• post yopiq (private) yoki o'chirilgan\n• havola noto'g'ri\n\n"
+                        "Boshqa havola bilan urinib ko'ring 🔁"
+                    )
+                return
+
+            await set_status(status, f"{emoji} <b>{site}</b>\n📤 Yuborilmoqda...")
+            items = []
+            for f in files:
+                ext = f.suffix.lower()
+                kind = "video" if ext in VIDEO_EXT else "photo" if ext in IMAGE_EXT else "audio"
+                items.append((kind, FSInputFile(f)))
+            cap = build_caption(site, info, me.username, time.monotonic() - t0)
+            has_video = any(k == "video" for k, _ in items)
+            sent = await send_items(m, items, cap, action_kb(url if has_video else None, me.username))
+
+        if len(cache) > 3000:
+            cache.clear()
+        cache[key] = {"items": sent, "cap": build_caption(site, info, me.username, None)}
+        await react(m, "🔥")
     except Exception as e:  # noqa: BLE001
         log.exception("Yuborishda xato: %s", e)
-        await m.answer("⚠️ Xatolik yuz berdi, birozdan so'ng qayta urinib ko'ring.")
+        await react(m, "😢")
+        await m.reply("⚠️ Kutilmagan xatolik. Birozdan so'ng qayta urinib ko'ring 🔁")
     finally:
+        stop.set()
+        typing.cancel()
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
         try:
@@ -274,31 +410,50 @@ async def on_link(m: Message):
 async def on_mp3(c: CallbackQuery):
     url = links.get(c.data[4:])
     if not url:
-        await c.answer("Havola eskirgan, iltimos qaytadan yuboring.", show_alert=True)
+        await c.answer("⌛ Havola eskirgan, qaytadan yuboring.", show_alert=True)
         return
-    await c.answer("🎵 Musiqa tayyorlanmoqda...")
-    await c.bot.send_chat_action(c.message.chat.id, ChatAction.UPLOAD_VOICE)
+    me = await c.bot.me()
+    site = detect_site(url) or "Video"
+    key = "mp3:" + cache_key(url)
+
+    if key in cache:
+        await c.answer("⚡ Tayyor!")
+        await c.message.answer_audio(cache[key]["file_id"], caption=f"🎶 Musiqa\n\n📥 @{me.username}")
+        return
+
+    await c.answer("🎶 Musiqa ajratilmoqda...")
+    stop = asyncio.Event()
+    typing = asyncio.create_task(keep_action(c.bot, c.message.chat.id, ChatAction.UPLOAD_VOICE, stop))
     folder = None
     try:
         async with sem:
-            folder = await download(url, audio=True)
+            folder, info = await download(url, site, audio=True)
         _, _, audios = collect(folder)
         audios = [a for a in audios if a.stat().st_size <= MAX_BYTES]
         if audios:
-            await c.message.answer_audio(FSInputFile(audios[0]), caption=await caption(c.bot))
+            title = html.escape((info.get("title") or "Musiqa")[:100])
+            r = await c.message.answer_audio(
+                FSInputFile(audios[0]),
+                title=info.get("title"),
+                performer=info.get("uploader"),
+                caption=f"🎶 <b>{title}</b>\n\n📥 @{me.username}",
+            )
+            cache[key] = {"file_id": r.audio.file_id}
         else:
-            await c.message.answer("😔 Musiqani ajratib bo'lmadi.")
+            await c.message.answer("😔 Bu videodan musiqani ajratib bo'lmadi.")
     except Exception as e:  # noqa: BLE001
         log.exception("MP3 xato: %s", e)
-        await c.message.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.")
+        await c.message.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
     finally:
+        stop.set()
+        typing.cancel()
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
 
 
 @dp.message(F.chat.type == "private")
 async def on_other(m: Message):
-    await m.answer("🔗 Menga video yoki rasm havolasini yuboring.")
+    await m.answer("🔗 Menga video yoki rasm <b>havolasini</b> yuboring — bir zumda yuklab beraman ⚡")
 
 
 # ---------- Ishga tushirish ----------
@@ -311,7 +466,6 @@ async def main():
         raise SystemExit("BOT_TOKEN o'rnatilmagan!")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
-    # Hosting (Render va h.k.) uchun kichik veb-server
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
