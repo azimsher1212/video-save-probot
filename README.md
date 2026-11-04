@@ -1,7 +1,7 @@
 # 📥 Video Save ProBot
 
 Instagram, YouTube, TikTok, Snapchat, Facebook dan rasm/videolarni musiqasi bilan yuklab beruvchi Telegram bot.
-👨‍💻 @azimsher
+👨‍💻 @Forward_admin1
 
 ## Imkoniyatlar
 - Havola yuborilsa — video (ovozi bilan) yoki rasmlar keladi
@@ -17,9 +17,9 @@ Instagram, YouTube, TikTok, Snapchat, Facebook dan rasm/videolarni musiqasi bila
    ```
    Insta, YouTube, TikTok, SnapChat, Facebook tarmoqlaridan rasm/videolarni musiqasi bilan yuklab beraman📥
 
-   👨‍💻:@azimsher
+   👨‍💻:@Forward_admin1
    ```
-5. `/setabouttext` → `Rasm/videolarni musiqasi bilan yuklab beraman📥 👨‍💻:@azimsher`
+5. `/setabouttext` → `Rasm/videolarni musiqasi bilan yuklab beraman📥 👨‍💻:@Forward_admin1`
 6. `/setcommands` → 
    ```
    start - Botni ishga tushirish
@@ -46,7 +46,7 @@ python bot.py
 | O'zgaruvchi | Vazifasi | Standart |
 |---|---|---|
 | `BOT_TOKEN` | BotFather tokeni | — (majburiy) |
-| `ADMIN_USERNAME` | Xabarlarda ko'rinadigan admin | `@azimsher` |
+| `ADMIN_USERNAME` | Xabarlarda ko'rinadigan admin | `@Forward_admin1` |
 | `COOKIES_FILE` | cookies.txt yo'li | yo'q |
 | `MAX_PARALLEL` | Bir vaqtdagi yuklashlar soni | `3` |
 

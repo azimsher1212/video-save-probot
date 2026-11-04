@@ -2,7 +2,7 @@
 Video Save ProBot
 Instagram, YouTube, TikTok, Pinterest, Snapchat, Facebook dan rasm/videolarni
 musiqasi bilan yuklab beruvchi Telegram bot.
-👨‍💻 @azimsher
+👨‍💻 @Forward_admin1
 """
 import asyncio
 import html
@@ -35,7 +35,7 @@ log = logging.getLogger("probot")
 
 # ---------- Sozlamalar ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN = os.getenv("ADMIN_USERNAME", "@azimsher")
+ADMIN = os.getenv("ADMIN_USERNAME", "@Forward_admin1")
 COOKIES = os.getenv("COOKIES_FILE")  # ixtiyoriy: cookies.txt yo'li
 PORT = int(os.getenv("PORT", "8080"))
 MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "3"))
