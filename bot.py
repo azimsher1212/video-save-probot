@@ -50,6 +50,8 @@ SITES = {
     "facebook.com": "Facebook",
     "fb.watch": "Facebook",
     "fb.com": "Facebook",
+    "pinterest.com": "Pinterest",
+    "pin.it": "Pinterest",
 }
 URL_RE = re.compile(r"https?://[^\s]+")
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm"}
@@ -62,7 +64,7 @@ dp = Dispatcher()
 
 START_TEXT = (
     "👋 <b>Assalomu alaykum!</b>\n\n"
-    "Men <b>Instagram, YouTube, TikTok, Snapchat, Facebook</b> tarmoqlaridan "
+    "Men <b>Instagram, YouTube, TikTok, Pinterest, Snapchat, Facebook</b> tarmoqlaridan "
     "rasm/videolarni musiqasi bilan yuklab beraman 📥\n\n"
     "🔗 Menga havolani yuboring — qolganini o'zim qilaman.\n"
     "🎵 Video ostidagi tugma orqali musiqasini MP3 qilib olasiz.\n\n"
@@ -226,7 +228,7 @@ async def on_start(m: Message):
 async def on_help(m: Message):
     await m.answer(
         "📌 <b>Qanday ishlatiladi:</b>\n"
-        "1. Instagram / YouTube / TikTok / Snapchat / Facebook dan havolani nusxalang\n"
+        "1. Instagram / YouTube / TikTok / Pinterest / Snapchat / Facebook dan havolani nusxalang\n"
         "2. Shu yerga yuboring\n"
         "3. Video yoki rasmlarni oling, xohlasangiz 🎵 tugma bilan MP3 ham\n\n"
         f"Savollar bo'yicha: {ADMIN}"
@@ -238,7 +240,9 @@ async def on_link(m: Message):
     url = URL_RE.search(m.text).group(0)
     site = detect_site(url)
     if not site:
-        await m.answer("❌ Bu sayt qo'llab-quvvatlanmaydi.\nInstagram, YouTube, TikTok, Snapchat yoki Facebook havolasini yuboring.")
+        if m.chat.type != "private":
+            return  # guruhlarda boshqa havolalarga jim turamiz
+        await m.answer("❌ Bu sayt qo'llab-quvvatlanmaydi.\nInstagram, YouTube, TikTok, Pinterest, Snapchat yoki Facebook havolasini yuboring.")
         return
 
     status = await m.answer(f"⏳ {site} dan yuklanmoqda, biroz kuting...")
@@ -292,7 +296,7 @@ async def on_mp3(c: CallbackQuery):
             shutil.rmtree(folder, ignore_errors=True)
 
 
-@dp.message()
+@dp.message(F.chat.type == "private")
 async def on_other(m: Message):
     await m.answer("🔗 Menga video yoki rasm havolasini yuboring.")
 
