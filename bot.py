@@ -165,6 +165,8 @@ def ydl_opts(folder: Path, audio: bool, low: bool = False) -> dict:
     }
     if COOKIES and Path(COOKIES).exists():
         opts["cookiefile"] = COOKIES
+    # YouTube server IP'larini ko'pincha to'sadi — boshqa mijozlar orqali urinib ko'ramiz
+    opts["extractor_args"] = {"youtube": {"player_client": ["default", "tv", "web_safari", "mweb", "android_vr"]}}
     if audio:
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [
@@ -954,6 +956,13 @@ async def on_link(m: Message):
                 if too_big:
                     await m.reply("📦 Fayl juda katta (50 MB dan ortiq) — Telegram buni botlarga ruxsat bermaydi.")
                 else:
+                    if site == "YouTube":
+                        await m.reply(
+                            "😔 <b>YouTube hozircha bu videoni bermadi.</b>\n\n"
+                            "YouTube serverlardan yuklashni ba'zan cheklaydi. Birozdan keyin qayta urinib ko'ring 🔁\n"
+                            "📸 Instagram, 🎵 TikTok va 📌 Pinterest muammosiz ishlaydi."
+                        )
+                        return
                     await m.reply(
                         "😔 <b>Yuklab bo'lmadi.</b>\n\n"
                         "Ehtimol:\n• post yopiq (private) yoki o'chirilgan\n• havola noto'g'ri\n\n"
