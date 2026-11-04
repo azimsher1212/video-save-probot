@@ -87,7 +87,9 @@ def start_text(name: str) -> str:
         "📸 Instagram  ▶️ YouTube  🎵 TikTok\n"
         "📌 Pinterest  👻 Snapchat  📘 Facebook\n\n"
         "🔗 <b>Havolani yuboring — qolganini o'zim qilaman!</b>\n"
-        "🎶 Video ostidagi tugma orqali musiqasini MP3 qilib olasiz.\n\n"
+        "🎶 Video ostidagi tugma — musiqasini MP3 qilib beradi\n"
+        "🖼 Rasmlarni <b>original sifatda</b> fayl qilib ham olasiz\n"
+        "💎 Videolar — 1080p gacha eng yuqori sifatda\n\n"
         f"👨‍💻 {ADMIN}"
     )
 
@@ -115,7 +117,7 @@ def cache_key(url: str) -> str:
     return url.split("?")[0].rstrip("/")
 
 
-def ydl_opts(folder: Path, audio: bool) -> dict:
+def ydl_opts(folder: Path, audio: bool, low: bool = False) -> dict:
     opts = {
         "outtmpl": str(folder / "%(id)s.%(ext)s"),
         "noplaylist": True,
@@ -135,12 +137,18 @@ def ydl_opts(folder: Path, audio: bool) -> dict:
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
         ]
     else:
-        # Birlashtirish shart bo'lmagan tayyor mp4 — eng tez variant
-        opts["format"] = (
-            "b[height<=720][ext=mp4]/"
-            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
-            "bv*[height<=720]+ba/b[height<=720]/b"
-        )
+        if low:
+            # Zaxira: fayl 50 MB dan oshsa, 720p
+            opts["format"] = "bv*[height<=720][filesize<?44M]+ba/b[height<=720]/bv*[height<=480]+ba/b"
+        else:
+            # Eng yuqori sifat (1080p gacha), 50 MB ga sig'adigan
+            opts["format"] = (
+                "bv*[height<=1080][filesize<?44M]+ba/"
+                "b[height<=1080][filesize<?48M]/"
+                "bv*[height<=720]+ba/b[height<=720]/b"
+            )
+        # Bir xil sifatda Telegram'da hamma joyda ochiladigan H.264 + AAC ni afzal ko'ramiz
+        opts["format_sort"] = ["res", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"]
         opts["merge_output_format"] = "mp4"
     return opts
 
@@ -173,9 +181,9 @@ async def run_gallery_dl(url: str, folder: Path) -> None:
         proc.kill()
 
 
-async def run_ytdlp(url: str, folder: Path, audio: bool) -> dict:
+async def run_ytdlp(url: str, folder: Path, audio: bool, low: bool = False) -> dict:
     def _yt():
-        with yt_dlp.YoutubeDL(ydl_opts(folder, audio)) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts(folder, audio, low)) as ydl:
             return ydl.extract_info(url, download=True) or {}
 
     try:
@@ -196,6 +204,12 @@ async def download(url: str, site: str, audio: bool = False) -> tuple[Path, dict
             return folder, info
 
     info = await run_ytdlp(url, folder, audio)
+    # Video 50 MB dan katta chiqsa — 720p da qayta yuklaymiz
+    vids, imgs, _ = collect(folder)
+    if not audio and vids and not imgs and all(v.stat().st_size > MAX_BYTES for v in vids):
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir()
+        info = await run_ytdlp(url, folder, audio, low=True) or info
     if not audio and not has_files(folder) and site not in GALLERY_FIRST:
         await run_gallery_dl(url, folder)
     return folder, info
@@ -218,14 +232,17 @@ def build_caption(site: str, info: dict, username: str, seconds: float | None) -
     return "\n".join(lines)
 
 
-def action_kb(url: str | None, username: str) -> InlineKeyboardMarkup:
+def action_kb(url: str, username: str, has_video: bool, has_photo: bool) -> InlineKeyboardMarkup:
     rows = []
-    if url:
+    if has_video or has_photo:
         if len(links) > 5000:
             links.clear()
         key = uuid.uuid4().hex[:12]
         links[key] = url
-        rows.append([InlineKeyboardButton(text="🎶 Musiqasini yuklash (MP3)", callback_data=f"mp3:{key}")])
+        if has_video:
+            rows.append([InlineKeyboardButton(text="🎶 Musiqasini yuklash (MP3)", callback_data=f"mp3:{key}")])
+        if has_photo:
+            rows.append([InlineKeyboardButton(text="🖼 Original sifatda (fayl)", callback_data=f"hd:{key}")])
     rows.append([InlineKeyboardButton(text="➕ Botni guruhga qo'shish", url=bot_link(username))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -342,9 +359,9 @@ async def on_link(m: Message):
     # ⚡ Avval yuklangan bo'lsa — darhol yuboramiz
     if key in cache:
         c = cache[key]
-        has_video = any(k == "video" for k, _ in c["items"])
+        kinds = {k for k, _ in c["items"]}
         try:
-            await send_items(m, c["items"], c["cap"], action_kb(url if has_video else None, me.username))
+            await send_items(m, c["items"], c["cap"], action_kb(url, me.username, "video" in kinds, "photo" in kinds))
             await react(m, "⚡")
             return
         except Exception as e:  # noqa: BLE001
@@ -384,8 +401,8 @@ async def on_link(m: Message):
                 kind = "video" if ext in VIDEO_EXT else "photo" if ext in IMAGE_EXT else "audio"
                 items.append((kind, FSInputFile(f)))
             cap = build_caption(site, info, me.username, time.monotonic() - t0)
-            has_video = any(k == "video" for k, _ in items)
-            sent = await send_items(m, items, cap, action_kb(url if has_video else None, me.username))
+            kinds = {k for k, _ in items}
+            sent = await send_items(m, items, cap, action_kb(url, me.username, "video" in kinds, "photo" in kinds))
 
         if len(cache) > 3000:
             cache.clear()
@@ -443,6 +460,52 @@ async def on_mp3(c: CallbackQuery):
             await c.message.answer("😔 Bu videodan musiqani ajratib bo'lmadi.")
     except Exception as e:  # noqa: BLE001
         log.exception("MP3 xato: %s", e)
+        await c.message.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
+    finally:
+        stop.set()
+        typing.cancel()
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@dp.callback_query(F.data.startswith("hd:"))
+async def on_hd(c: CallbackQuery):
+    url = links.get(c.data[3:])
+    if not url:
+        await c.answer("⌛ Havola eskirgan, qaytadan yuboring.", show_alert=True)
+        return
+    me = await c.bot.me()
+    site = detect_site(url) or "Rasm"
+    key = "hd:" + cache_key(url)
+
+    if key in cache:
+        await c.answer("⚡ Tayyor!")
+        for fid in cache[key]["file_ids"]:
+            await c.message.answer_document(fid)
+        return
+
+    await c.answer("🖼 Original sifat tayyorlanmoqda...")
+    stop = asyncio.Event()
+    typing = asyncio.create_task(keep_action(c.bot, c.message.chat.id, ChatAction.UPLOAD_DOCUMENT, stop))
+    folder = None
+    try:
+        async with sem:
+            folder, _ = await download(url, site)
+        _, images, _ = collect(folder)
+        images = [i for i in images if i.stat().st_size <= MAX_BYTES]
+        if not images:
+            await c.message.answer("😔 Original rasmni olib bo'lmadi.")
+            return
+        ids = []
+        for n, img in enumerate(images[:10]):
+            r = await c.message.answer_document(
+                FSInputFile(img),
+                caption=f"🖼 Original sifat • {SITE_EMOJI.get(site, '🌐')} {site}\n\n📥 @{me.username}" if n == 0 else None,
+            )
+            ids.append(r.document.file_id)
+        cache[key] = {"file_ids": ids}
+    except Exception as e:  # noqa: BLE001
+        log.exception("HD xato: %s", e)
         await c.message.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
     finally:
         stop.set()
