@@ -114,17 +114,17 @@ WELCOME_ID: str | None = None  # bir marta yuklangach Telegram file_id qayta ish
 def start_text(name: str) -> str:
     return (
         f"👋 <b>Salom, {html.escape(name)}!</b>\n\n"
-        "Men — <b>FORWARD SAVE</b> 🔴🔵 ⚡\n"
-        "Rasm va videolarni <b>musiqasi bilan</b> bir zumda yuklab beraman 📥\n\n"
-        "📸 Instagram  ▶️ YouTube  🎵 TikTok\n"
-        "📌 Pinterest  👻 Snapchat  📘 Facebook\n\n"
-        "🔗 <b>Havolani yuboring — qolganini o'zim qilaman!</b>\n"
-        "🎶 Video ostidagi tugma — musiqasini MP3 qilib beradi\n"
-        "🎧 Faqat musiqa kerakmi? <code>/mp3 havola</code> yoki havola + <b>mp3</b>\n"
-        "🔎 Qo'shiq nomini yozing — topib, MP3 qilib beraman\n"
-        "🖼 Rasmlarni <b>original sifatda</b> fayl qilib ham olasiz\n"
-        "💎 Videolar — 1080p gacha eng yuqori sifatda\n\n"
-        f"👨‍💻 {ADMIN}"
+        "📥 Rasm va videolarni musiqasi bilan yuklab beraman\n\n"
+        "📸 Instagram\n"
+        "▶️ YouTube\n"
+        "🎵 TikTok\n"
+        "📌 Pinterest\n"
+        "👻 Snapchat\n"
+        "📘 Facebook\n\n"
+        "🔗 Havola yuboring — video\n"
+        "🎧 Havola + <b>mp3</b> — musiqa\n"
+        "🔎 Qo'shiq nomi — qidiruv\n\n"
+        f"👨‍💻 Admin: {ADMIN}"
     )
 
 
@@ -1305,10 +1305,18 @@ async def on_other(m: Message):
 BOT_NAME = "Forward Save"
 BOT_ABOUT = "Rasm/videolarni musiqasi bilan yuklab beraman 📥 👨‍💻 " + ADMIN
 BOT_DESCRIPTION = (
-    "Insta, YouTube, TikTok, Pinterest, SnapChat, Facebook tarmoqlaridan "
-    "rasm/videolarni musiqasi bilan yuklab beraman📥\n\n"
-    "⚡ Tez  💎 1080p HD  🎶 MP3  🆓 Bepul\n\n"
-    f"👨‍💻: {ADMIN}"
+    "📥 Rasm va videolarni musiqasi bilan yuklab beraman\n\n"
+    "📸 Instagram\n"
+    "▶️ YouTube\n"
+    "🎵 TikTok\n"
+    "📌 Pinterest\n"
+    "👻 Snapchat\n"
+    "📘 Facebook\n\n"
+    "⚡ Tez\n"
+    "💎 1080p HD\n"
+    "🎶 MP3\n"
+    "🆓 Bepul\n\n"
+    f"👨‍💻 Admin: {ADMIN}"
 )
 AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
 
