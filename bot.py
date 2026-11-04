@@ -885,6 +885,129 @@ async def run_broadcast(bot: Bot, report_chat: int, from_chat: int, msg_id: int)
     )
 
 
+# ---------- Guruhlarda havolalarni tozalash (bot admin bo'lsa) ----------
+GROUP_TYPES = {"group", "supergroup"}
+_admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
+_bot_rights: dict[int, tuple[bool, float]] = {}
+_antilink_off: dict[int, bool] = {}
+
+
+def has_link(m: Message) -> bool:
+    text = m.text or m.caption or ""
+    if text.startswith("/"):
+        return False
+    for e in (m.entities or []) + (m.caption_entities or []):
+        if e.type in ("url", "text_link"):
+            return True
+    return bool(URL_RE.search(text) or re.search(r"\bt\.me/|telegram\.me/", text, re.I))
+
+
+async def is_group_admin(m: Message) -> bool:
+    if m.sender_chat:  # anonim admin yoki kanal nomidan yozilgan
+        return True
+    if not m.from_user:
+        return False
+    key = (m.chat.id, m.from_user.id)
+    hit = _admin_cache.get(key)
+    if hit and hit[1] > time.monotonic():
+        return hit[0]
+    try:
+        cm = await m.bot.get_chat_member(m.chat.id, m.from_user.id)
+        ok = cm.status in ("administrator", "creator")
+    except Exception:  # noqa: BLE001
+        ok = True  # aniqlab bo'lmasa — o'chirmaymiz
+    _admin_cache[key] = (ok, time.monotonic() + 300)
+    return ok
+
+
+async def can_delete(m: Message) -> bool:
+    hit = _bot_rights.get(m.chat.id)
+    if hit and hit[1] > time.monotonic():
+        return hit[0]
+    try:
+        me = await m.bot.me()
+        cm = await m.bot.get_chat_member(m.chat.id, me.id)
+        ok = cm.status == "administrator" and bool(getattr(cm, "can_delete_messages", False))
+    except Exception:  # noqa: BLE001
+        ok = False
+    _bot_rights[m.chat.id] = (ok, time.monotonic() + 600)
+    return ok
+
+
+async def antilink_on(chat_id: int) -> bool:
+    if chat_id not in _antilink_off:
+        _antilink_off[chat_id] = (await db.get_setting(f"antilink:{chat_id}")) == "off"
+    return not _antilink_off[chat_id]
+
+
+async def warn_and_vanish(m: Message, text: str, seconds: int = 10) -> None:
+    try:
+        w = await m.answer(text)
+        await asyncio.sleep(seconds)
+        await w.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@dp.message(Command("antilink"), F.chat.type.in_(GROUP_TYPES))
+async def on_antilink_cmd(m: Message):
+    if not await is_group_admin(m):
+        return
+    arg = ((m.text or "").split(maxsplit=1) + [""])[1].strip().lower()
+    if arg in ("off", "o'chir", "0"):
+        _antilink_off[m.chat.id] = True
+        await db.set_setting(f"antilink:{m.chat.id}", "off")
+        await m.answer("🔓 Havolalarni o'chirish <b>to'xtatildi</b>. Yoqish: /antilink on")
+    elif arg in ("on", "yoq", "1"):
+        _antilink_off[m.chat.id] = False
+        await db.set_setting(f"antilink:{m.chat.id}", None)
+        ok = await can_delete(m)
+        await m.answer("🔒 Havolalarni o'chirish <b>yoqildi</b>." + ("" if ok else
+                       "\n⚠️ Ishlashi uchun botni admin qilib, <b>xabarlarni o'chirish</b> ruxsatini bering."))
+    else:
+        state = "yoqilgan 🔒" if await antilink_on(m.chat.id) else "o'chirilgan 🔓"
+        rights = "✅ bor" if await can_delete(m) else "❌ yo'q (botni admin qiling)"
+        await m.answer(
+            f"🛡 <b>Havolalarni tozalash:</b> {state}\n🗑 O'chirish ruxsati: {rights}\n\n"
+            "/antilink on — yoqish\n/antilink off — o'chirish\n\n"
+            "ℹ️ Instagram/TikTok/YouTube havolasi kelsa — avval video yuklab beriladi, keyin havola o'chadi. "
+            "Guruh adminlarining xabarlariga tegilmaydi."
+        )
+
+
+@dp.message(F.chat.type.in_(GROUP_TYPES), F.func(has_link))
+async def on_group_link(m: Message):
+    text = m.text or ""
+    url_m = URL_RE.search(text)
+    supported = bool(text and url_m and detect_site(url_m.group(0)))
+
+    async def media_reply():
+        if supported:
+            if MP3_WORD.search(text):
+                await on_link_mp3(m)
+            else:
+                await on_link(m)
+
+    if (not await antilink_on(m.chat.id)) or (await is_group_admin(m)) or not (await can_delete(m)):
+        await media_reply()
+        return
+
+    who = html.escape(m.from_user.first_name) if m.from_user else "Foydalanuvchi"
+    if supported:
+        await media_reply()  # avval foydali ishni qilamiz, keyin havolani tozalaymiz
+        try:
+            await m.delete()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Havolani o'chirib bo'lmadi: %s", e)
+        return
+    try:
+        await m.delete()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Havolani o'chirib bo'lmadi: %s", e)
+        return
+    asyncio.create_task(warn_and_vanish(m, f"🚫 {who}, guruhda havola tashlash mumkin emas."))
+
+
 MP3_WORD = re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
 
 
