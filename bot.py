@@ -408,6 +408,265 @@ def brand_kb() -> InlineKeyboardMarkup:
     ])
 
 
+# ---------- Kanalni boshqarish (faqat admin) ----------
+from datetime import datetime, timedelta, timezone
+
+UZ_TZ = timezone(timedelta(hours=5))  # O'zbekiston vaqti (yozgi vaqt yo'q)
+POST_CHANNEL = "@" + sorted(BRAND_CHANNELS)[0] if BRAND_CHANNELS else None
+post_wait: set[int] = set()
+sched_wait: set[int] = set()
+drafts: dict[int, dict] = {}
+SHORT_SIGN = f'\n\n🌐 <b>{SIGN_MARK}</b> · <a href="{BRAND_IG}">Instagram</a> | <a href="{BRAND_TG}">Telegram</a>'
+
+
+def channel_buttons() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Buyurtma berish", url=f"https://t.me/{ADMIN.lstrip('@')}")],
+        [InlineKeyboardButton(text="📸 Instagram", url=BRAND_IG),
+         InlineKeyboardButton(text="▶️ YouTube", url=BRAND_YT)],
+    ])
+
+
+def signed(html_text: str, kind: str) -> str:
+    if SIGN_MARK in html_text:
+        return html_text
+    limit = 4096 if kind == "text" else 1024
+    for sig in (SIGNATURE, SHORT_SIGN):
+        if len(html_text) + len(sig) <= limit:
+            return (html_text + sig).lstrip("\n")
+    return html_text
+
+
+def draft_kb(d: dict) -> InlineKeyboardMarkup:
+    on = lambda v: "✅" if v else "❌"  # noqa: E731
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Hozir chiqarish", callback_data="pst:now"),
+         InlineKeyboardButton(text="⏰ Rejalashtirish", callback_data="pst:sched")],
+        [InlineKeyboardButton(text=f"🔘 Tugmalar {on(d['buttons'])}", callback_data="pst:btn"),
+         InlineKeyboardButton(text=f"📌 Pin {on(d['pin'])}", callback_data="pst:pin")],
+        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="pst:cancel")],
+    ])
+
+
+async def publish(bot: Bot, src_chat: int, src_msg: int, kind: str, html_text: str, buttons: bool, pin: bool):
+    kb = channel_buttons() if buttons else None
+    body = signed(html_text or "", kind)
+    if kind == "text":
+        sent = await bot.send_message(POST_CHANNEL, body, reply_markup=kb, disable_web_page_preview=True)
+        msg_id = sent.message_id
+    else:
+        sent = await bot.copy_message(POST_CHANNEL, src_chat, src_msg, caption=body, reply_markup=kb)
+        msg_id = sent.message_id
+    if pin:
+        try:
+            await bot.pin_chat_message(POST_CHANNEL, msg_id, disable_notification=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Pin qilib bo'lmadi: %s", e)
+    return msg_id
+
+
+def post_link(msg_id: int) -> str:
+    return f"https://t.me/{POST_CHANNEL.lstrip('@')}/{msg_id}"
+
+
+def parse_when(text: str) -> datetime | None:
+    t = text.strip().lower().replace("ertaga", "+1").replace("bugun", "")
+    now = datetime.now(UZ_TZ)
+    m = re.match(r"^\s*(\+1)?\s*(\d{1,2})[:.](\d{2})\s*$", t)
+    if m:
+        h, mi = int(m.group(2)), int(m.group(3))
+        if h > 23 or mi > 59:
+            return None
+        dt = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if m.group(1):
+            dt += timedelta(days=1)
+        elif dt <= now:
+            dt += timedelta(days=1)
+        return dt
+    m = re.match(r"^\s*(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+(\d{1,2})[:.](\d{2})\s*$", t)
+    if m:
+        d, mo = int(m.group(1)), int(m.group(2))
+        y = int(m.group(3)) if m.group(3) else now.year
+        if y < 100:
+            y += 2000
+        try:
+            dt = datetime(y, mo, d, int(m.group(4)), int(m.group(5)), tzinfo=UZ_TZ)
+        except ValueError:
+            return None
+        return dt if dt > now else None
+    return None
+
+
+async def show_draft(m: Message, d: dict) -> None:
+    """Postning kanalda qanday ko'rinishini ko'rsatadi + boshqaruv tugmalari."""
+    kb = channel_buttons() if d["buttons"] else None
+    body = signed(d["html"] or "", d["kind"])
+    try:
+        if d["kind"] == "text":
+            await m.answer(body, reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await m.bot.copy_message(m.chat.id, d["src_chat"], d["src_msg"], caption=body, reply_markup=kb)
+    except Exception as e:  # noqa: BLE001
+        await m.answer(f"⚠️ Ko'rinishni chiqarib bo'lmadi: {html.escape(str(e)[:150])}")
+    await m.answer(f"👆 <b>Kanalda shunday chiqadi</b> ({POST_CHANNEL})\nNima qilamiz?", reply_markup=draft_kb(d))
+
+
+@dp.message(Command("post"), F.func(lambda m: is_admin(m.from_user)))
+async def on_post_cmd(m: Message):
+    if not POST_CHANNEL:
+        await m.answer("Kanal sozlanmagan.")
+        return
+    post_wait.add(m.from_user.id)
+    sched_wait.discard(m.from_user.id)
+    await m.answer(
+        f"✍️ <b>{POST_CHANNEL} uchun yangi post</b>\n\n"
+        "Menga yuboring:\n"
+        "• matn, rasm yoki video (izohi bilan)\n"
+        "• yoki <b>Instagram/TikTok/YouTube havolasi</b> — o'zim yuklab, post tayyorlayman\n\n"
+        "Bekor qilish: /cancel"
+    )
+
+
+@dp.message(Command("posts"), F.func(lambda m: is_admin(m.from_user)))
+async def on_posts_list(m: Message):
+    rows = await db.upcoming_posts()
+    if not rows:
+        await m.answer("⏰ Rejalashtirilgan post yo'q.")
+        return
+    lines = ["⏰ <b>Rejalashtirilgan postlar</b>\n"]
+    kb = []
+    for r in rows:
+        when = r["run_at"].astimezone(UZ_TZ).strftime("%d.%m %H:%M")
+        preview = re.sub(r"<[^>]+>", "", r["html"] or "")[:40] or ("🖼 media" if r["kind"] != "text" else "")
+        lines.append(f"<b>#{r['id']}</b> · {when} · {html.escape(preview)}")
+        kb.append([InlineKeyboardButton(text=f"🗑 #{r['id']} ni bekor qilish", callback_data=f"pst:del:{r['id']}")])
+    await m.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+@dp.message(F.func(lambda m: m.from_user and m.from_user.id in sched_wait and m.text and not m.text.startswith("/")))
+async def on_sched_time(m: Message):
+    d = drafts.get(m.from_user.id)
+    when = parse_when(m.text)
+    if not d or not when:
+        await m.answer("🕐 Vaqtni tushunmadim. Masalan: <code>21:30</code>, <code>ertaga 09:00</code> yoki <code>05.11 18:00</code>")
+        return
+    sched_wait.discard(m.from_user.id)
+    pid = await db.add_post(m.chat.id, d["src_chat"], d["src_msg"], d["kind"], d["html"], d["buttons"], d["pin"],
+                            when.astimezone(timezone.utc))
+    drafts.pop(m.from_user.id, None)
+    if pid:
+        await m.answer(f"✅ Post <b>#{pid}</b> rejalashtirildi: <b>{when.strftime('%d.%m.%Y %H:%M')}</b>\nRo'yxat: /posts")
+    else:
+        await m.answer("⚠️ Saqlab bo'lmadi (baza ulanmagan).")
+
+
+@dp.message(F.func(lambda m: m.from_user and m.from_user.id in post_wait and not (m.text or "").startswith("/")))
+async def on_post_content(m: Message):
+    post_wait.discard(m.from_user.id)
+    d = {"buttons": True, "pin": False}
+    url_m = URL_RE.fullmatch((m.text or "").strip())
+    if url_m and detect_site(url_m.group(0)):
+        url = url_m.group(0)
+        site = detect_site(url)
+        status = await m.answer(f"{SITE_EMOJI.get(site, '🌐')} {site} dan post tayyorlanmoqda...")
+        folder = None
+        try:
+            async with sem:
+                folder, info = await download(url, site)
+            videos, images, _ = collect(folder)
+            files = [f for f in videos + images if f.stat().st_size <= MAX_BYTES]
+            if not files:
+                await m.answer("😔 Bu havoladan media olib bo'lmadi. Boshqa havola yoki faylni o'zingiz yuboring: /post")
+                return
+            cap = (info.get("description") or info.get("title") or "").strip()
+            cap_html = html.escape(cap[:700])
+            f = files[0]
+            if f.suffix.lower() in VIDEO_EXT:
+                src = await m.answer_video(FSInputFile(f), caption=cap_html or None, supports_streaming=True)
+            else:
+                src = await m.answer_photo(FSInputFile(f), caption=cap_html or None)
+            d.update(src_chat=src.chat.id, src_msg=src.message_id, kind="media", html=cap_html)
+        finally:
+            if folder:
+                shutil.rmtree(folder, ignore_errors=True)
+            try:
+                await status.delete()
+            except Exception:  # noqa: BLE001
+                pass
+    elif m.text:
+        d.update(src_chat=m.chat.id, src_msg=m.message_id, kind="text", html=m.html_text)
+    elif m.photo or m.video or m.animation or m.document or m.audio:
+        d.update(src_chat=m.chat.id, src_msg=m.message_id, kind="media", html=m.html_text if m.caption else "")
+    else:
+        await m.answer("Bu turdagi xabarni post qilib bo'lmaydi. Matn, rasm yoki video yuboring: /post")
+        return
+    drafts[m.from_user.id] = d
+    await show_draft(m, d)
+
+
+@dp.callback_query(F.data.startswith("pst:"), F.func(lambda c: is_admin(c.from_user)))
+async def on_post_cb(c: CallbackQuery):
+    act = c.data[4:]
+    if act.startswith("del:"):
+        pid = int(act[4:])
+        await db.finish_post(pid)
+        await c.answer(f"#{pid} bekor qilindi")
+        await c.message.edit_reply_markup(reply_markup=None)
+        return
+    d = drafts.get(c.from_user.id)
+    if not d:
+        await c.answer("Qoralama topilmadi. /post bilan qaytadan boshlang", show_alert=True)
+        return
+    if act in ("btn", "pin"):
+        key = "buttons" if act == "btn" else "pin"
+        d[key] = not d[key]
+        await c.answer("✅ Yoqildi" if d[key] else "❌ O'chirildi")
+        await c.message.edit_reply_markup(reply_markup=draft_kb(d))
+    elif act == "now":
+        await c.answer("📤 Chiqarilmoqda...")
+        try:
+            mid = await publish(c.bot, d["src_chat"], d["src_msg"], d["kind"], d["html"], d["buttons"], d["pin"])
+            drafts.pop(c.from_user.id, None)
+            await c.message.edit_text(f'✅ Post kanalga chiqdi: <a href="{post_link(mid)}">ko\'rish</a>')
+        except Exception as e:  # noqa: BLE001
+            await c.message.answer(
+                "⚠️ Kanalga chiqarib bo'lmadi. Botni kanalda <b>admin</b> qilib, "
+                "<b>post qilish</b>, <b>tahrirlash</b> va <b>pin</b> ruxsatlarini bering.\n"
+                f"<i>{html.escape(str(e)[:150])}</i>"
+            )
+    elif act == "sched":
+        sched_wait.add(c.from_user.id)
+        await c.answer()
+        await c.message.answer(
+            "🕐 Qachon chiqarilsin? (O'zbekiston vaqti)\n\n"
+            "Masalan:\n<code>21:30</code> — bugun (o'tgan bo'lsa ertaga)\n"
+            "<code>ertaga 09:00</code>\n<code>05.11 18:00</code>"
+        )
+    elif act == "cancel":
+        drafts.pop(c.from_user.id, None)
+        sched_wait.discard(c.from_user.id)
+        await c.answer("Bekor qilindi")
+        await c.message.edit_text("❌ Post bekor qilindi.")
+
+
+async def scheduler(bot: Bot) -> None:
+    """Har 30 soniyada vaqti kelgan postlarni kanalga chiqaradi."""
+    await db.init_posts()
+    while True:
+        try:
+            for r in await db.due_posts():
+                await db.finish_post(r["id"])
+                try:
+                    mid = await publish(bot, r["src_chat"], r["src_msg"], r["kind"], r["html"] or "", r["buttons"], r["pin"])
+                    await bot.send_message(r["admin_chat"], f'✅ Rejalashtirilgan post <b>#{r["id"]}</b> chiqdi: <a href="{post_link(mid)}">ko\'rish</a>')
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Rejali post xatosi: %s", e)
+                    await bot.send_message(r["admin_chat"], f"⚠️ Post #{r['id']} chiqmadi: {html.escape(str(e)[:150])}")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Scheduler xatosi: %s", e)
+        await asyncio.sleep(30)
+
+
 @dp.message(Command("about", "forward"))
 async def on_about(m: Message):
     await m.answer(BRAND_TEXT, reply_markup=brand_kb(), disable_web_page_preview=True)
@@ -490,6 +749,8 @@ def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm:stat"),
          InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="adm:send")],
+        [InlineKeyboardButton(text="✍️ Kanalga post", callback_data="adm:post"),
+         InlineKeyboardButton(text="⏰ Rejadagi postlar", callback_data="adm:posts")],
     ])
 
 
@@ -511,6 +772,12 @@ async def on_admin_cb(c: CallbackQuery):
         await c.answer()
         broadcast_wait.add(c.from_user.id)
         await c.message.answer("📨 Hammaga yuboriladigan xabarni yuboring (matn, rasm, video — istalgani).\nBekor qilish: /cancel")
+    elif act == "post":
+        await c.answer()
+        await on_post_cmd(c.message.model_copy(update={"from_user": c.from_user}))
+    elif act == "posts":
+        await c.answer()
+        await on_posts_list(c.message)
     elif act == "go":
         pend = pending_broadcast.pop(c.from_user.id, None)
         if not pend:
@@ -529,6 +796,9 @@ async def on_admin_cb(c: CallbackQuery):
 async def on_cancel(m: Message):
     broadcast_wait.discard(m.from_user.id)
     pending_broadcast.pop(m.from_user.id, None)
+    post_wait.discard(m.from_user.id)
+    sched_wait.discard(m.from_user.id)
+    drafts.pop(m.from_user.id, None)
     await m.answer("❌ Bekor qilindi.")
 
 
@@ -930,6 +1200,7 @@ async def main():
     await db.init()
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(setup_profile(bot))
+    asyncio.create_task(scheduler(bot))
     log.info("Bot ishga tushdi")
     await dp.start_polling(bot)
 

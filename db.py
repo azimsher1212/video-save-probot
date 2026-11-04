@@ -119,3 +119,33 @@ async def stats() -> dict | None:
         " GROUP BY kind ORDER BY n DESC"
     )
     return {"main": dict(one[0]) if one else {}, "sites": sites, "kinds": kinds}
+
+
+# ---------- Kanal uchun rejalashtirilgan postlar ----------
+async def init_posts() -> None:
+    await _exec(
+        "CREATE TABLE IF NOT EXISTS scheduled_posts (id BIGSERIAL PRIMARY KEY, admin_chat BIGINT, src_chat BIGINT,"
+        " src_msg BIGINT, kind TEXT, html TEXT, buttons BOOLEAN, pin BOOLEAN, run_at TIMESTAMPTZ,"
+        " done BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now())"
+    )
+
+
+async def add_post(admin_chat, src_chat, src_msg, kind, html_text, buttons, pin, run_at) -> int | None:
+    rows = await _fetch(
+        "INSERT INTO scheduled_posts (admin_chat, src_chat, src_msg, kind, html, buttons, pin, run_at)"
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+        admin_chat, src_chat, src_msg, kind, html_text, buttons, pin, run_at,
+    )
+    return rows[0]["id"] if rows else None
+
+
+async def due_posts() -> list:
+    return await _fetch("SELECT * FROM scheduled_posts WHERE NOT done AND run_at <= now() ORDER BY run_at LIMIT 10")
+
+
+async def upcoming_posts() -> list:
+    return await _fetch("SELECT * FROM scheduled_posts WHERE NOT done ORDER BY run_at LIMIT 20")
+
+
+async def finish_post(post_id: int) -> None:
+    await _exec("UPDATE scheduled_posts SET done=true WHERE id=$1", post_id)
