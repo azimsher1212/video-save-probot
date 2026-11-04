@@ -264,8 +264,7 @@ def build_caption(site: str, info: dict, username: str, seconds: float | None) -
         meta += f"  •  ⚡ {seconds:.1f} soniyada"
     lines.append(meta)
     lines.append("")
-    lines.append(f"🔵🔴 <b>FORWARD SAVE</b> · @{username}")
-    lines.append(f'🌐 <a href="{BRAND_TG}">FORWARD® | Premium Brand</a>')
+    lines.append(f"📥 @{username} — video, rasm va musiqani yuklab beradi")
     return "\n".join(lines)
 
 
@@ -381,7 +380,7 @@ SIGNATURE = (
 
 
 BOT_LINE_RE = re.compile(
-    r"(FORWARD SAVE|@\w*_?bot\b|soniyada|orqali yuklandi|reklamasiz|Premium Brand</a>)",
+    r"(FORWARD SAVE|@\w*_?bot\b|soniyada|orqali yuklandi|reklamasiz|yuklab beradi|Premium Brand</a>)",
     re.IGNORECASE,
 )
 
@@ -1038,7 +1037,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
             cap = f"🎶 <b>{title}</b>\n"
             if author:
                 cap += f"👤 {html.escape(str(author)[:60])}\n"
-            cap += f"{SITE_EMOJI.get(site, '🌐')} {site}  •  ⚡ {time.monotonic() - t0:.1f} soniyada\n\n🔵🔴 <b>FORWARD SAVE</b> · @{me.username}"
+            cap += f"{SITE_EMOJI.get(site, '🌐')} {site}  •  ⚡ {time.monotonic() - t0:.1f} soniyada\n\n📥 @{me.username} — video, rasm va musiqani yuklab beradi"
             r = await send(
                 FSInputFile(audios[0]),
                 title=info.get("title"),
@@ -1046,7 +1045,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
                 caption=cap,
             )
             track(user_id, target.chat.type, site, "mp3", True, time.monotonic() - t0)
-            cache[key] = {"file_id": r.audio.file_id, "cap": cap.split("  •  ⚡")[0] + f"\n\n🔵🔴 <b>FORWARD SAVE</b> · @{me.username}"}
+            cache[key] = {"file_id": r.audio.file_id, "cap": cap.split("  •  ⚡")[0] + f"\n\n📥 @{me.username} — video, rasm va musiqani yuklab beradi"}
         else:
             track(user_id, target.chat.type, site, "mp3", False, time.monotonic() - t0)
             await target.answer("😔 Bu havoladan musiqani ajratib bo'lmadi.")
