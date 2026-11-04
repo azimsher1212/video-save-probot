@@ -1321,6 +1321,31 @@ BOT_DESCRIPTION = (
 AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
 
 
+CHANNEL_BIO = (
+    "🌐 FORWARD® | Premium Brand\n"
+    "🌫️ Kafel • Qurilish materiallari\n"
+    "🛠️ Professional uskunalar\n"
+    "🚚 🇺🇿 bo‘ylab yetkazib berish\n"
+    "📱 +998945650779\n"
+    "📱 +998934069707\n"
+    "📸 instagram.com/forward.uzbekistan\n"
+    "▶️ youtube.com/@FORWARD-9707"
+)
+
+
+async def setup_channel_bio(bot: Bot) -> None:
+    """Kanal tarjimai holini o'rnatadi (botga 'Kanal ma'lumotini o'zgartirish' ruxsati kerak)."""
+    if not POST_CHANNEL:
+        return
+    try:
+        chat = await bot.get_chat(POST_CHANNEL)
+        if (chat.description or "").strip() != CHANNEL_BIO:
+            await bot.set_chat_description(POST_CHANNEL, CHANNEL_BIO[:255])
+            log.info("Kanal tarjimai holi yangilandi")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Kanal tarjimai holini o'zgartirib bo'lmadi: %s", e)
+
+
 async def setup_profile(bot: Bot) -> None:
     try:
         await bot.set_my_commands([
@@ -1365,6 +1390,7 @@ async def main():
     await db.init()
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(setup_profile(bot))
+    asyncio.create_task(setup_channel_bio(bot))
     asyncio.create_task(scheduler(bot))
     log.info("Bot ishga tushdi")
     await dp.start_polling(bot)
