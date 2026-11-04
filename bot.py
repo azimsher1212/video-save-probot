@@ -1303,13 +1303,11 @@ async def on_other(m: Message):
 
 # ---------- Bot profilini avtomatik sozlash ----------
 BOT_NAME = "Forward Save"
-BOT_ABOUT = "Rasm/videolarni musiqasi bilan yuklab beraman 📥 Insta · YouTube · TikTok · Pinterest 👨‍💻 " + ADMIN
+BOT_ABOUT = "Rasm/videolarni musiqasi bilan yuklab beraman 📥 👨‍💻 " + ADMIN
 BOT_DESCRIPTION = (
     "Insta, YouTube, TikTok, Pinterest, SnapChat, Facebook tarmoqlaridan "
     "rasm/videolarni musiqasi bilan yuklab beraman📥\n\n"
     "⚡ Tez  💎 1080p HD  🎶 MP3  🆓 Bepul\n\n"
-    "🌐 FORWARD® | Premium Brand — kafel, qurilish materiallari, professional uskunalar\n"
-    "📱 +998 94 565 07 79 · +998 93 406 97 07\n\n"
     f"👨‍💻: {ADMIN}"
 )
 AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
