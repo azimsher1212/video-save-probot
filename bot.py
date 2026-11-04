@@ -252,20 +252,10 @@ async def download(url: str, site: str, audio: bool = False) -> tuple[Path, dict
 
 
 def build_caption(site: str, info: dict, username: str, seconds: float | None) -> str:
-    lines = []
     title = (info.get("title") or info.get("description") or "").strip().split("\n")[0]
-    if title and title.lower() not in {"video", "pin", "instagram", "tiktok"}:
-        lines.append(f"🎬 <b>{html.escape(title[:120])}</b>")
-    author = info.get("uploader") or info.get("channel") or info.get("creator")
-    if author:
-        lines.append(f"👤 {html.escape(str(author)[:60])}")
-    meta = f"{SITE_EMOJI.get(site, '🌐')} {site}"
-    if seconds is not None:
-        meta += f"  •  ⚡ {seconds:.1f} soniyada"
-    lines.append(meta)
-    lines.append("")
-    lines.append(f"📥 @{username} — video, rasm va musiqani yuklab beradi")
-    return "\n".join(lines)
+    if title and title.lower() not in {"video", "pin", "instagram", "tiktok"} and not title.startswith("http"):
+        return f"<b>{html.escape(title[:100])}</b>\n\n📥 @{username}"
+    return f"📥 @{username}"
 
 
 def action_kb(url: str, username: str, has_video: bool, has_photo: bool) -> InlineKeyboardMarkup:
@@ -1174,10 +1164,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
         if audios:
             title = html.escape((info.get("title") or "Musiqa")[:100])
             author = info.get("uploader") or info.get("channel")
-            cap = f"🎶 <b>{title}</b>\n"
-            if author:
-                cap += f"👤 {html.escape(str(author)[:60])}\n"
-            cap += f"{SITE_EMOJI.get(site, '🌐')} {site}  •  ⚡ {time.monotonic() - t0:.1f} soniyada\n\n📥 @{me.username} — video, rasm va musiqani yuklab beradi"
+            cap = f"🎶 <b>{title}</b>\n\n📥 @{me.username}"
             r = await send(
                 FSInputFile(audios[0]),
                 title=info.get("title"),
@@ -1185,7 +1172,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
                 caption=cap,
             )
             track(user_id, target.chat.type, site, "mp3", True, time.monotonic() - t0)
-            cache[key] = {"file_id": r.audio.file_id, "cap": cap.split("  •  ⚡")[0] + f"\n\n📥 @{me.username} — video, rasm va musiqani yuklab beradi"}
+            cache[key] = {"file_id": r.audio.file_id, "cap": cap}
         else:
             track(user_id, target.chat.type, site, "mp3", False, time.monotonic() - t0)
             await target.answer("😔 Bu havoladan musiqani ajratib bo'lmadi.")
