@@ -407,14 +407,18 @@ async def pin_latest(post: Message) -> None:
         _pinned_groups.add(post.media_group_id)
         if len(_pinned_groups) > 500:
             _pinned_groups.clear()
-    key = f"last_pin:{post.chat.id}"
+    await pin_id(post.bot, post.chat.id, post.message_id)
+
+
+async def pin_id(bot: Bot, chat_id, msg_id: int) -> None:
+    key = f"last_pin:{chat_id}"
     try:
         prev = await db.get_setting(key)
-        await post.bot.pin_chat_message(post.chat.id, post.message_id, disable_notification=True)
-        await db.set_setting(key, str(post.message_id))
-        if prev and prev.isdigit() and int(prev) != post.message_id:
+        await bot.pin_chat_message(chat_id, msg_id, disable_notification=True)
+        await db.set_setting(key, str(msg_id))
+        if prev and prev.isdigit() and int(prev) != msg_id:
             try:
-                await post.bot.unpin_chat_message(post.chat.id, message_id=int(prev))
+                await bot.unpin_chat_message(chat_id, message_id=int(prev))
             except Exception:  # noqa: BLE001
                 pass
     except Exception as e:  # noqa: BLE001
@@ -512,11 +516,8 @@ async def publish(bot: Bot, src_chat: int, src_msg: int, kind: str, html_text: s
     else:
         sent = await bot.copy_message(POST_CHANNEL, src_chat, src_msg, caption=body, reply_markup=kb)
         msg_id = sent.message_id
-    if pin:
-        try:
-            await bot.pin_chat_message(POST_CHANNEL, msg_id, disable_notification=False)
-        except Exception as e:  # noqa: BLE001
-            log.warning("Pin qilib bo'lmadi: %s", e)
+    # bot orqali chiqqan post ham doim pin qilinadi (oxirgi post tepada)
+    await pin_id(bot, POST_CHANNEL, msg_id)
     return msg_id
 
 
