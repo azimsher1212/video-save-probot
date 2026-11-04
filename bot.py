@@ -378,6 +378,25 @@ SIGNATURE = (
 )
 
 
+BOT_LINE_RE = re.compile(
+    r"(FORWARD SAVE|@\w*_?bot\b|soniyada|orqali yuklandi|reklamasiz|Premium Brand</a>)",
+    re.IGNORECASE,
+)
+
+
+def strip_bot_info(html_text: str) -> str:
+    """Bot yozgan izoh qatorlarini (bot nomi, tezlik, muallif) olib tashlaydi."""
+    if not html_text:
+        return ""
+    kept = []
+    for line in html_text.split("\n"):
+        plain = re.sub(r"<[^>]+>", "", line).strip()
+        if BOT_LINE_RE.search(line) or plain.startswith("👤 ") or plain.startswith("📥"):
+            continue
+        kept.append(line.replace("🎬 ", "", 1) if plain.startswith("🎬 ") else line)
+    return "\n".join(kept).strip()
+
+
 @dp.channel_post()
 async def on_channel_post(post: Message):
     """Brend kanalidagi har bir yangi post ostiga imzo qo'shadi (bot kanalda admin bo'lishi kerak)."""
@@ -385,17 +404,23 @@ async def on_channel_post(post: Message):
         return
     try:
         if post.text is not None:
-            body = post.html_text
-            if SIGN_MARK in (post.text or "") or len(post.text) + 220 > 4096:
+            raw = post.html_text
+            body = strip_bot_info(raw)
+            if SIGN_MARK in body or len(body) + 220 > 4096:
+                if body != raw.strip():
+                    await post.edit_text(body or "🌐", disable_web_page_preview=True)
                 return
             await post.edit_text(body + SIGNATURE, disable_web_page_preview=True)
         elif post.caption is not None or (post.photo or post.video or post.document or post.audio or post.animation):
             if post.media_group_id and not post.caption:
                 return  # albomda imzo faqat matnli birinchi rasmga qo'yiladi
-            body = post.html_text if post.caption else ""
-            if SIGN_MARK in (post.caption or "") or len(post.caption or "") + 220 > 1024:
+            raw = post.html_text if post.caption else ""
+            body = strip_bot_info(raw)
+            if SIGN_MARK in body:
+                if body != raw.strip():
+                    await post.edit_caption(caption=body)
                 return
-            await post.edit_caption(caption=(body + SIGNATURE).lstrip("\n"))
+            await post.edit_caption(caption=signed(body, "media"))
     except Exception as e:  # noqa: BLE001
         log.warning("Kanal postiga imzo qo'yib bo'lmadi: %s", e)
 
@@ -420,10 +445,9 @@ SHORT_SIGN = f'\n\n🌐 <b>{SIGN_MARK}</b> · <a href="{BRAND_IG}">Instagram</a>
 
 
 def channel_buttons() -> InlineKeyboardMarkup:
+    # Instagram/Telegram/YouTube imzoda bor — tugmada takrorlamaymiz
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Buyurtma berish", url=f"https://t.me/{ADMIN.lstrip('@')}")],
-        [InlineKeyboardButton(text="📸 Instagram", url=BRAND_IG),
-         InlineKeyboardButton(text="▶️ YouTube", url=BRAND_YT)],
     ])
 
 
@@ -450,7 +474,7 @@ def draft_kb(d: dict) -> InlineKeyboardMarkup:
 
 async def publish(bot: Bot, src_chat: int, src_msg: int, kind: str, html_text: str, buttons: bool, pin: bool):
     kb = channel_buttons() if buttons else None
-    body = signed(html_text or "", kind)
+    body = signed(strip_bot_info(html_text or ""), kind)
     if kind == "text":
         sent = await bot.send_message(POST_CHANNEL, body, reply_markup=kb, disable_web_page_preview=True)
         msg_id = sent.message_id
@@ -500,7 +524,7 @@ def parse_when(text: str) -> datetime | None:
 async def show_draft(m: Message, d: dict) -> None:
     """Postning kanalda qanday ko'rinishini ko'rsatadi + boshqaruv tugmalari."""
     kb = channel_buttons() if d["buttons"] else None
-    body = signed(d["html"] or "", d["kind"])
+    body = signed(strip_bot_info(d["html"] or ""), d["kind"])
     try:
         if d["kind"] == "text":
             await m.answer(body, reply_markup=kb, disable_web_page_preview=True)
