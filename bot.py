@@ -16,7 +16,10 @@ from pathlib import Path
 
 import yt_dlp
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+
+import db
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandStart
@@ -78,6 +81,63 @@ links: dict[str, str] = {}  # callback kaliti -> havola
 cache: dict[str, dict] = {}  # havola -> {"items": [(tur, file_id)], "cap": str}
 sem = asyncio.Semaphore(MAX_PARALLEL)
 dp = Dispatcher()
+ADMIN_USERNAMES = {u.strip().lstrip("@").lower() for u in os.getenv("ADMINS", "Forward_admin1,azimsher").split(",") if u.strip()}
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+CHANNEL: str | None = None  # majburiy obuna kanali (@kanal), bazadan yuklanadi
+member_ok: dict[int, float] = {}  # a'zolik tekshiruvi keshi
+broadcast_wait: set[int] = set()
+pending_broadcast: dict[int, tuple[int, int]] = {}
+
+
+def is_admin(user) -> bool:
+    return bool(user) and (user.id in ADMIN_IDS or (user.username or "").lower() in ADMIN_USERNAMES)
+
+
+def track(user_id: int, chat_type: str, site: str, kind: str, ok: bool, seconds: float) -> None:
+    asyncio.create_task(db.log_download(user_id, chat_type, site, kind, ok, seconds))
+
+
+async def is_member(bot: Bot, channel: str, user_id: int) -> bool:
+    if member_ok.get(user_id, 0) > time.monotonic():
+        return True
+    try:
+        cm = await bot.get_chat_member(channel, user_id)
+        ok = cm.status in ("member", "administrator", "creator", "restricted")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Obunani tekshirib bo'lmadi (%s): %s", channel, e)
+        return True  # tekshirib bo'lmasa — foydalanuvchini to'xtatmaymiz
+    if ok:
+        member_ok[user_id] = time.monotonic() + 600
+    return ok
+
+
+def sub_kb(channel: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Kanalga a'zo bo'lish", url=f"https://t.me/{channel.lstrip('@')}")],
+        [InlineKeyboardButton(text="✅ A'zo bo'ldim — tekshirish", callback_data="sub:check")],
+    ])
+
+
+class Gate(BaseMiddleware):
+    """Har bir xabarda: foydalanuvchini bazaga yozish va (yoqilgan bo'lsa) obunani tekshirish."""
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and not user.is_bot and isinstance(event, Message) and event.chat.type == "private":
+            asyncio.create_task(db.touch_user(user))
+            text = event.text or ""
+            if CHANNEL and not is_admin(user) and not text.startswith("/start"):
+                if not await is_member(event.bot, CHANNEL, user.id):
+                    await event.answer(
+                        "📢 <b>Botdan foydalanish uchun kanalimizga a'zo bo'ling</b>\n\n"
+                        "A'zo bo'lgach, <b>✅ A'zo bo'ldim</b> tugmasini bosing va havolani qayta yuboring 🙌",
+                        reply_markup=sub_kb(CHANNEL),
+                    )
+                    return None
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(Gate())
 WELCOME_IMG = Path(__file__).parent / "assets" / "welcome.jpg"
 WELCOME_ID: str | None = None  # bir marta yuklangach Telegram file_id qayta ishlatiladi
 
@@ -93,6 +153,7 @@ def start_text(name: str) -> str:
         "🔗 <b>Havolani yuboring — qolganini o'zim qilaman!</b>\n"
         "🎶 Video ostidagi tugma — musiqasini MP3 qilib beradi\n"
         "🎧 Faqat musiqa kerakmi? <code>/mp3 havola</code> yoki havola + <b>mp3</b>\n"
+        "🔎 Qo'shiq nomini yozing — topib, MP3 qilib beraman\n"
         "🖼 Rasmlarni <b>original sifatda</b> fayl qilib ham olasiz\n"
         "💎 Videolar — 1080p gacha eng yuqori sifatda\n\n"
         f"👨‍💻 {ADMIN}"
@@ -346,6 +407,8 @@ async def on_help(m: Message):
         "2️⃣ Havolani shu yerga yuboring\n"
         "3️⃣ Bir necha soniyada video yoki rasm tayyor ✅\n"
         "4️⃣ 🎶 tugma bilan musiqasini MP3 qilib oling\n\n"
+        "🔎 <b>Qo'shiq qidirish:</b> shunchaki nomini yozing\n"
+        "masalan: <i>Shoxrux Yurak</i>\n\n"
         "🎧 <b>Faqat MP3 (videosiz):</b>\n"
         "• <code>/mp3 havola</code>\n"
         "• yoki havola yonida <b>mp3</b> deb yozing\n"
@@ -353,6 +416,174 @@ async def on_help(m: Message):
         "👥 Guruhlarda ham ishlayman — meni guruhga qo'shing!\n\n"
         f"❓ Savollar: {ADMIN}"
     )
+
+
+# ---------- Admin panel ----------
+def fmt_stats(st: dict | None) -> str:
+    if not st:
+        return "📊 Statistika uchun baza ulanmagan."
+    m = st["main"]
+    rows = [
+        ("Jami foydalanuvchi", m.get("users", 0)),
+        ("Bugun qo'shilgan", m.get("new_day", 0)),
+        ("7 kunda qo'shilgan", m.get("new_week", 0)),
+        ("24 soatda faol", m.get("active_day", 0)),
+        ("Botni bloklagan", m.get("blocked", 0)),
+        ("Bugun yuklash", m.get("dl_day", 0)),
+        ("Bugun muvaffaqiyatli", m.get("dl_day_ok", 0)),
+        ("Jami yuklash", m.get("dl_total", 0)),
+        ("O'rtacha tezlik, s", m.get("avg_sec") or "-"),
+    ]
+    w = max(len(r[0]) for r in rows)
+    table = "\n".join(f"{k.ljust(w)}  {v}" for k, v in rows)
+    sites = "\n".join(f"{(r['site'] or '-').ljust(10)} {r['n']}" for r in st["sites"]) or "-"
+    kinds = "\n".join(f"{(r['kind'] or '-').ljust(10)} {r['n']}" for r in st["kinds"]) or "-"
+    ch = CHANNEL or "o'chiq"
+    return (
+        "📊 <b>FORWARD SAVE — statistika</b>\n\n"
+        f"<pre>{html.escape(table)}</pre>\n"
+        f"<b>Tarmoqlar (7 kun):</b>\n<pre>{html.escape(sites)}</pre>\n"
+        f"<b>Turlar (7 kun):</b>\n<pre>{html.escape(kinds)}</pre>\n"
+        f"📢 Majburiy obuna: <b>{html.escape(ch)}</b>"
+    )
+
+
+def admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm:stat"),
+         InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="adm:send")],
+        [InlineKeyboardButton(text="📢 Obuna kanali", callback_data="adm:chan")],
+    ])
+
+
+@dp.message(Command("admin", "stat"), F.func(lambda m: is_admin(m.from_user)))
+async def on_admin(m: Message):
+    await m.answer(fmt_stats(await db.stats()), reply_markup=admin_kb())
+
+
+@dp.callback_query(F.data.startswith("adm:"), F.func(lambda c: is_admin(c.from_user)))
+async def on_admin_cb(c: CallbackQuery):
+    act = c.data[4:]
+    if act == "stat":
+        await c.answer("🔄")
+        try:
+            await c.message.edit_text(fmt_stats(await db.stats()), reply_markup=admin_kb())
+        except Exception:  # noqa: BLE001
+            pass
+    elif act == "send":
+        await c.answer()
+        broadcast_wait.add(c.from_user.id)
+        await c.message.answer("📨 Hammaga yuboriladigan xabarni yuboring (matn, rasm, video — istalgani).\nBekor qilish: /cancel")
+    elif act == "chan":
+        await c.answer()
+        await c.message.answer(
+            f"📢 Hozirgi kanal: <b>{html.escape(CHANNEL or 'o‘chiq')}</b>\n\n"
+            "Yoqish: <code>/setchannel @kanal_nomi</code>\nO'chirish: <code>/setchannel off</code>\n\n"
+            "⚠️ Avval botni kanalga <b>admin</b> qilib qo'shing — aks holda a'zolikni tekshira olmaydi."
+        )
+    elif act == "go":
+        pend = pending_broadcast.pop(c.from_user.id, None)
+        if not pend:
+            await c.answer("Xabar topilmadi", show_alert=True)
+            return
+        await c.answer("🚀 Boshlandi")
+        await c.message.edit_reply_markup(reply_markup=None)
+        asyncio.create_task(run_broadcast(c.bot, c.message.chat.id, *pend))
+    elif act == "no":
+        pending_broadcast.pop(c.from_user.id, None)
+        await c.answer("Bekor qilindi")
+        await c.message.edit_text("❌ Yuborish bekor qilindi.")
+
+
+@dp.message(Command("cancel"), F.func(lambda m: is_admin(m.from_user)))
+async def on_cancel(m: Message):
+    broadcast_wait.discard(m.from_user.id)
+    pending_broadcast.pop(m.from_user.id, None)
+    await m.answer("❌ Bekor qilindi.")
+
+
+@dp.message(Command("setchannel"), F.func(lambda m: is_admin(m.from_user)))
+async def on_setchannel(m: Message):
+    global CHANNEL
+    arg = (m.text or "").split(maxsplit=1)[1].strip() if len((m.text or "").split()) > 1 else ""
+    if not arg:
+        await m.answer("Foydalanish: <code>/setchannel @kanal</code> yoki <code>/setchannel off</code>")
+        return
+    if arg.lower() in ("off", "0", "yoq", "o'chir"):
+        CHANNEL = None
+        await db.set_setting("channel", None)
+        await m.answer("✅ Majburiy obuna <b>o'chirildi</b>.")
+        return
+    ch = "@" + arg.lstrip("@").replace("https://t.me/", "").split("/")[0]
+    try:
+        me = await m.bot.me()
+        cm = await m.bot.get_chat_member(ch, me.id)
+        if cm.status not in ("administrator", "creator"):
+            raise ValueError("bot admin emas")
+    except Exception as e:  # noqa: BLE001
+        await m.answer(f"⚠️ {html.escape(ch)} kanalida botni admin qilib qo'shing, keyin qayta urinib ko'ring.\n<i>{html.escape(str(e)[:120])}</i>")
+        return
+    CHANNEL = ch
+    member_ok.clear()
+    await db.set_setting("channel", ch)
+    await m.answer(f"✅ Majburiy obuna yoqildi: <b>{html.escape(ch)}</b>")
+
+
+@dp.message(F.func(lambda m: m.from_user and m.from_user.id in broadcast_wait))
+async def on_broadcast_content(m: Message):
+    broadcast_wait.discard(m.from_user.id)
+    pending_broadcast[m.from_user.id] = (m.chat.id, m.message_id)
+    n = len(await db.active_user_ids())
+    await m.answer(
+        f"👆 Shu xabar <b>{n}</b> ta foydalanuvchiga yuboriladi. Tasdiqlaysizmi?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Yuborish", callback_data="adm:go"),
+            InlineKeyboardButton(text="❌ Bekor", callback_data="adm:no"),
+        ]]),
+    )
+
+
+async def run_broadcast(bot: Bot, report_chat: int, from_chat: int, msg_id: int) -> None:
+    ids = await db.active_user_ids()
+    ok = blocked = failed = 0
+    status = await bot.send_message(report_chat, f"📨 Yuborilmoqda... 0/{len(ids)}")
+    for i, uid in enumerate(ids, 1):
+        for _ in range(2):
+            try:
+                await bot.copy_message(uid, from_chat, msg_id)
+                ok += 1
+                break
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except TelegramForbiddenError:
+                blocked += 1
+                await db.mark_blocked(uid)
+                break
+            except Exception:  # noqa: BLE001
+                failed += 1
+                break
+        await asyncio.sleep(0.05)  # Telegram limiti: sekundiga ~20 ta
+        if i % 100 == 0:
+            try:
+                await status.edit_text(f"📨 Yuborilmoqda... {i}/{len(ids)}")
+            except Exception:  # noqa: BLE001
+                pass
+    await status.edit_text(
+        "✅ <b>Yuborish tugadi</b>\n\n"
+        f"<pre>Yetkazildi   {ok}\nBloklagan    {blocked}\nXato         {failed}\nJami         {len(ids)}</pre>"
+    )
+
+
+@dp.callback_query(F.data == "sub:check")
+async def on_sub_check(c: CallbackQuery):
+    if not CHANNEL or await is_member(c.bot, CHANNEL, c.from_user.id):
+        await c.answer("✅ Rahmat! Endi havolani yuboring", show_alert=True)
+        try:
+            await c.message.delete()
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        await c.answer("❌ Hali a'zo bo'lmadingiz", show_alert=True)
 
 
 MP3_WORD = re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
@@ -376,7 +607,7 @@ async def on_mp3_command(m: Message):
         await m.answer("🤔 Bu saytni hali tanimayman.")
         return
     await react(m, "👌")
-    await deliver_mp3(m, url, reply=True)
+    await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0)
 
 
 @dp.message(F.text.regexp(URL_RE) & F.text.regexp(MP3_WORD))
@@ -385,7 +616,7 @@ async def on_link_mp3(m: Message):
     if not detect_site(url):
         return
     await react(m, "👌")
-    await deliver_mp3(m, url, reply=True)
+    await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0)
 
 
 @dp.message(F.text.regexp(URL_RE))
@@ -412,6 +643,7 @@ async def on_link(m: Message):
         try:
             await send_items(m, c["items"], c["cap"], action_kb(url, me.username, "video" in kinds, "photo" in kinds))
             await react(m, "⚡")
+            track(m.from_user.id if m.from_user else 0, m.chat.type, site, "kesh", True, 0)
             return
         except Exception as e:  # noqa: BLE001
             log.warning("Keshdan yuborib bo'lmadi: %s", e)
@@ -432,6 +664,7 @@ async def on_link(m: Message):
 
             if not files:
                 stop.set()
+                track(m.from_user.id if m.from_user else 0, m.chat.type, site, "media", False, time.monotonic() - t0)
                 await react(m, "😢")
                 if too_big:
                     await m.reply("📦 Fayl juda katta (50 MB dan ortiq) — Telegram buni botlarga ruxsat bermaydi.")
@@ -457,6 +690,8 @@ async def on_link(m: Message):
             cache.clear()
         cache[key] = {"items": sent, "cap": build_caption(site, info, me.username, None)}
         await react(m, "🔥")
+        track(m.from_user.id if m.from_user else 0, m.chat.type, site,
+              "video" if "video" in kinds else "rasm", True, time.monotonic() - t0)
     except Exception as e:  # noqa: BLE001
         log.exception("Yuborishda xato: %s", e)
         await react(m, "😢")
@@ -479,10 +714,10 @@ async def on_mp3(c: CallbackQuery):
         await c.answer("⌛ Havola eskirgan, qaytadan yuboring.", show_alert=True)
         return
     await c.answer("🎶 Musiqa ajratilmoqda...")
-    await deliver_mp3(c.message, url)
+    await deliver_mp3(c.message, url, user_id=c.from_user.id)
 
 
-async def deliver_mp3(target: Message, url: str, reply: bool = False) -> None:
+async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: int = 0) -> None:
     """Havoladan faqat musiqani (MP3) ajratib yuboradi."""
     bot = target.bot
     me = await bot.me()
@@ -516,8 +751,10 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False) -> None:
                 performer=author,
                 caption=cap,
             )
+            track(user_id, target.chat.type, site, "mp3", True, time.monotonic() - t0)
             cache[key] = {"file_id": r.audio.file_id, "cap": cap.split("  •  ⚡")[0] + f"\n\n🔵🔴 <b>FORWARD SAVE</b> · @{me.username}"}
         else:
+            track(user_id, target.chat.type, site, "mp3", False, time.monotonic() - t0)
             await target.answer("😔 Bu havoladan musiqani ajratib bo'lmadi.")
     except Exception as e:  # noqa: BLE001
         log.exception("MP3 xato: %s", e)
@@ -575,9 +812,73 @@ async def on_hd(c: CallbackQuery):
             shutil.rmtree(folder, ignore_errors=True)
 
 
+# ---------- Qo'shiq qidirish ----------
+async def search_songs(query: str) -> list[tuple[str, str, int | None, str]]:
+    def _s(prefix):
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+        with yt_dlp.YoutubeDL(opts) as y:
+            r = y.extract_info(f"{prefix}8:{query}", download=False) or {}
+            return r.get("entries") or []
+
+    out = []
+    for prefix in ("ytsearch", "scsearch"):  # YouTube, topilmasa SoundCloud
+        try:
+            ents = await asyncio.wait_for(asyncio.to_thread(_s, prefix), timeout=25)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Qidiruv xatosi (%s): %s", prefix, str(e)[:150])
+            ents = []
+        for e in ents:
+            if not e:
+                continue
+            url = e.get("url") or e.get("webpage_url")
+            if prefix == "ytsearch" and e.get("id"):
+                url = f"https://www.youtube.com/watch?v={e['id']}"
+            dur = e.get("duration")
+            if url and (not dur or dur <= 900):  # 15 daqiqadan uzunlari — qo'shiq emas
+                out.append((e.get("title") or "?", e.get("channel") or e.get("uploader") or "", dur, url))
+        if out:
+            break
+    return out[:6]
+
+
+def fmt_dur(sec) -> str:
+    if not sec:
+        return ""
+    sec = int(sec)
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+@dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def on_search(m: Message):
+    q = m.text.strip()
+    if len(q) < 2 or len(q) > 100:
+        await m.answer("🔗 Havola yuboring yoki 🔎 qo'shiq nomini yozing (masalan: <i>Shoxrux Yurak</i>)")
+        return
+    status = await m.reply(f"🔎 <b>{html.escape(q)}</b> qidirilmoqda...")
+    results = await search_songs(q)
+    try:
+        await status.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    if not results:
+        await m.reply("😔 Hech narsa topilmadi. Boshqacha yozib ko'ring yoki havola yuboring 🔗")
+        return
+    lines = [f"🎵 <b>{html.escape(q)}</b> bo'yicha topildi:\n"]
+    buttons = []
+    for i, (title, author, dur, url) in enumerate(results, 1):
+        meta = " · ".join(x for x in (author[:30], fmt_dur(dur)) if x)
+        lines.append(f"<b>{i}.</b> {html.escape(title[:70])}" + (f"\n     <i>{html.escape(meta)}</i>" if meta else ""))
+        key = uuid.uuid4().hex[:12]
+        links[key] = url
+        buttons.append(InlineKeyboardButton(text=f"{i} 🎶", callback_data=f"mp3:{key}"))
+    lines.append("\n👇 Raqamni bosing — MP3 darhol keladi")
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await m.reply("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
 @dp.message(F.chat.type == "private")
 async def on_other(m: Message):
-    await m.answer("🔗 Menga video yoki rasm <b>havolasini</b> yuboring — bir zumda yuklab beraman ⚡")
+    await m.answer("🔗 Menga video yoki rasm <b>havolasini</b> yuboring yoki 🔎 qo'shiq nomini yozing ⚡")
 
 
 # ---------- Bot profilini avtomatik sozlash ----------
@@ -632,6 +933,9 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
+    await db.init()
+    global CHANNEL
+    CHANNEL = await db.get_setting("channel")
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(setup_profile(bot))
     log.info("Bot ishga tushdi")
