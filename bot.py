@@ -76,6 +76,8 @@ links: dict[str, str] = {}  # callback kaliti -> havola
 cache: dict[str, dict] = {}  # havola -> {"items": [(tur, file_id)], "cap": str}
 sem = asyncio.Semaphore(MAX_PARALLEL)
 dp = Dispatcher()
+WELCOME_IMG = Path(__file__).parent / "assets" / "welcome.jpg"
+WELCOME_ID: str | None = None  # bir marta yuklangach Telegram file_id qayta ishlatiladi
 
 
 # ---------- Matnlar ----------
@@ -323,7 +325,14 @@ async def on_start(m: Message):
             [InlineKeyboardButton(text="👨‍💻 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN.lstrip('@')}")],
         ]
     )
-    await m.answer(start_text(m.from_user.first_name if m.from_user else "do'stim"), reply_markup=kb)
+    text = start_text(m.from_user.first_name if m.from_user else "do'stim")
+    global WELCOME_ID
+    try:
+        r = await m.answer_photo(WELCOME_ID or FSInputFile(WELCOME_IMG), caption=text, reply_markup=kb)
+        WELCOME_ID = r.photo[-1].file_id
+    except Exception as e:  # noqa: BLE001
+        log.warning("Banner yuborilmadi: %s", e)
+        await m.answer(text, reply_markup=kb)
 
 
 @dp.message(Command("help"))
