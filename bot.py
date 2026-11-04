@@ -1,5 +1,5 @@
 """
-Video Save ProBot
+Forward Save bot (Video Save ProBot)
 Instagram, YouTube, TikTok, Pinterest, Snapchat, Facebook dan rasm/videolarni
 musiqasi bilan yuklab beruvchi Telegram bot.
 👨‍💻 @Forward_admin1
@@ -84,7 +84,7 @@ WELCOME_ID: str | None = None  # bir marta yuklangach Telegram file_id qayta ish
 def start_text(name: str) -> str:
     return (
         f"👋 <b>Salom, {html.escape(name)}!</b>\n\n"
-        "Men — <b>Video Save ProBot</b> ⚡\n"
+        "Men — <b>FORWARD SAVE</b> 🔴🔵 ⚡\n"
         "Rasm va videolarni <b>musiqasi bilan</b> bir zumda yuklab beraman 📥\n\n"
         "📸 Instagram  ▶️ YouTube  🎵 TikTok\n"
         "📌 Pinterest  👻 Snapchat  📘 Facebook\n\n"
@@ -230,7 +230,7 @@ def build_caption(site: str, info: dict, username: str, seconds: float | None) -
         meta += f"  •  ⚡ {seconds:.1f} soniyada"
     lines.append(meta)
     lines.append("")
-    lines.append(f"📥 @{username} — tez, bepul, reklamasiz")
+    lines.append(f"🔵🔴 <b>FORWARD SAVE</b> · @{username}")
     return "\n".join(lines)
 
 
@@ -530,7 +530,7 @@ async def on_other(m: Message):
 
 # ---------- Ishga tushirish ----------
 async def health(_request):
-    return web.Response(text="Video Save ProBot ishlayapti ✅")
+    return web.Response(text="Forward Save bot ishlayapti ✅")
 
 
 async def main():
