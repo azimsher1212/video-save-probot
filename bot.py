@@ -971,7 +971,7 @@ async def on_antilink_cmd(m: Message):
             f"🛡 <b>Havolalarni tozalash:</b> {state}\n🗑 O'chirish ruxsati: {rights}\n\n"
             "/antilink on — yoqish\n/antilink off — o'chirish\n\n"
             "ℹ️ Instagram/TikTok/YouTube havolasi kelsa — avval video yuklab beriladi, keyin havola o'chadi. "
-            "Guruh adminlarining xabarlariga tegilmaydi."
+            "Havola kimdan bo'lsa ham (adminlar ham) o'chiriladi."
         )
 
 
@@ -988,11 +988,15 @@ async def on_group_link(m: Message):
             else:
                 await on_link(m)
 
-    if (not await antilink_on(m.chat.id)) or (await is_group_admin(m)) or not (await can_delete(m)):
+    # adminlar ham istisno emas — havola kimdan bo'lsa ham o'chiriladi
+    if (not await antilink_on(m.chat.id)) or not (await can_delete(m)):
         await media_reply()
         return
 
-    who = html.escape(m.from_user.first_name) if m.from_user else "Foydalanuvchi"
+    if m.sender_chat:
+        who = html.escape(m.sender_chat.title or "Admin")
+    else:
+        who = html.escape(m.from_user.first_name) if m.from_user else "Foydalanuvchi"
     if supported:
         await media_reply()  # avval foydali ishni qilamiz, keyin havolani tozalaymiz
         try:
