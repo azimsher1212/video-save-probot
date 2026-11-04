@@ -83,8 +83,6 @@ sem = asyncio.Semaphore(MAX_PARALLEL)
 dp = Dispatcher()
 ADMIN_USERNAMES = {u.strip().lstrip("@").lower() for u in os.getenv("ADMINS", "Forward_admin1,azimsher").split(",") if u.strip()}
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-CHANNEL: str | None = None  # majburiy obuna kanali (@kanal), bazadan yuklanadi
-member_ok: dict[int, float] = {}  # a'zolik tekshiruvi keshi
 broadcast_wait: set[int] = set()
 pending_broadcast: dict[int, tuple[int, int]] = {}
 
@@ -97,43 +95,13 @@ def track(user_id: int, chat_type: str, site: str, kind: str, ok: bool, seconds:
     asyncio.create_task(db.log_download(user_id, chat_type, site, kind, ok, seconds))
 
 
-async def is_member(bot: Bot, channel: str, user_id: int) -> bool:
-    if member_ok.get(user_id, 0) > time.monotonic():
-        return True
-    try:
-        cm = await bot.get_chat_member(channel, user_id)
-        ok = cm.status in ("member", "administrator", "creator", "restricted")
-    except Exception as e:  # noqa: BLE001
-        log.warning("Obunani tekshirib bo'lmadi (%s): %s", channel, e)
-        return True  # tekshirib bo'lmasa — foydalanuvchini to'xtatmaymiz
-    if ok:
-        member_ok[user_id] = time.monotonic() + 600
-    return ok
-
-
-def sub_kb(channel: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Kanalga a'zo bo'lish", url=f"https://t.me/{channel.lstrip('@')}")],
-        [InlineKeyboardButton(text="✅ A'zo bo'ldim — tekshirish", callback_data="sub:check")],
-    ])
-
-
 class Gate(BaseMiddleware):
-    """Har bir xabarda: foydalanuvchini bazaga yozish va (yoqilgan bo'lsa) obunani tekshirish."""
+    """Har bir xabarda foydalanuvchini statistika uchun bazaga yozadi. Hech narsani cheklamaydi."""
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         if user and not user.is_bot and isinstance(event, Message) and event.chat.type == "private":
             asyncio.create_task(db.touch_user(user))
-            text = event.text or ""
-            if CHANNEL and not is_admin(user) and not text.startswith("/start"):
-                if not await is_member(event.bot, CHANNEL, user.id):
-                    await event.answer(
-                        "📢 <b>Botdan foydalanish uchun kanalimizga a'zo bo'ling</b>\n\n"
-                        "A'zo bo'lgach, <b>✅ A'zo bo'ldim</b> tugmasini bosing va havolani qayta yuboring 🙌",
-                        reply_markup=sub_kb(CHANNEL),
-                    )
-                    return None
         return await handler(event, data)
 
 
@@ -438,13 +406,11 @@ def fmt_stats(st: dict | None) -> str:
     table = "\n".join(f"{k.ljust(w)}  {v}" for k, v in rows)
     sites = "\n".join(f"{(r['site'] or '-').ljust(10)} {r['n']}" for r in st["sites"]) or "-"
     kinds = "\n".join(f"{(r['kind'] or '-').ljust(10)} {r['n']}" for r in st["kinds"]) or "-"
-    ch = CHANNEL or "o'chiq"
     return (
         "📊 <b>FORWARD SAVE — statistika</b>\n\n"
         f"<pre>{html.escape(table)}</pre>\n"
         f"<b>Tarmoqlar (7 kun):</b>\n<pre>{html.escape(sites)}</pre>\n"
-        f"<b>Turlar (7 kun):</b>\n<pre>{html.escape(kinds)}</pre>\n"
-        f"📢 Majburiy obuna: <b>{html.escape(ch)}</b>"
+        f"<b>Turlar (7 kun):</b>\n<pre>{html.escape(kinds)}</pre>"
     )
 
 
@@ -452,7 +418,6 @@ def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm:stat"),
          InlineKeyboardButton(text="📨 Xabar yuborish", callback_data="adm:send")],
-        [InlineKeyboardButton(text="📢 Obuna kanali", callback_data="adm:chan")],
     ])
 
 
@@ -474,13 +439,6 @@ async def on_admin_cb(c: CallbackQuery):
         await c.answer()
         broadcast_wait.add(c.from_user.id)
         await c.message.answer("📨 Hammaga yuboriladigan xabarni yuboring (matn, rasm, video — istalgani).\nBekor qilish: /cancel")
-    elif act == "chan":
-        await c.answer()
-        await c.message.answer(
-            f"📢 Hozirgi kanal: <b>{html.escape(CHANNEL or 'o‘chiq')}</b>\n\n"
-            "Yoqish: <code>/setchannel @kanal_nomi</code>\nO'chirish: <code>/setchannel off</code>\n\n"
-            "⚠️ Avval botni kanalga <b>admin</b> qilib qo'shing — aks holda a'zolikni tekshira olmaydi."
-        )
     elif act == "go":
         pend = pending_broadcast.pop(c.from_user.id, None)
         if not pend:
@@ -500,33 +458,6 @@ async def on_cancel(m: Message):
     broadcast_wait.discard(m.from_user.id)
     pending_broadcast.pop(m.from_user.id, None)
     await m.answer("❌ Bekor qilindi.")
-
-
-@dp.message(Command("setchannel"), F.func(lambda m: is_admin(m.from_user)))
-async def on_setchannel(m: Message):
-    global CHANNEL
-    arg = (m.text or "").split(maxsplit=1)[1].strip() if len((m.text or "").split()) > 1 else ""
-    if not arg:
-        await m.answer("Foydalanish: <code>/setchannel @kanal</code> yoki <code>/setchannel off</code>")
-        return
-    if arg.lower() in ("off", "0", "yoq", "o'chir"):
-        CHANNEL = None
-        await db.set_setting("channel", None)
-        await m.answer("✅ Majburiy obuna <b>o'chirildi</b>.")
-        return
-    ch = "@" + arg.lstrip("@").replace("https://t.me/", "").split("/")[0]
-    try:
-        me = await m.bot.me()
-        cm = await m.bot.get_chat_member(ch, me.id)
-        if cm.status not in ("administrator", "creator"):
-            raise ValueError("bot admin emas")
-    except Exception as e:  # noqa: BLE001
-        await m.answer(f"⚠️ {html.escape(ch)} kanalida botni admin qilib qo'shing, keyin qayta urinib ko'ring.\n<i>{html.escape(str(e)[:120])}</i>")
-        return
-    CHANNEL = ch
-    member_ok.clear()
-    await db.set_setting("channel", ch)
-    await m.answer(f"✅ Majburiy obuna yoqildi: <b>{html.escape(ch)}</b>")
 
 
 @dp.message(F.func(lambda m: m.from_user and m.from_user.id in broadcast_wait))
@@ -572,18 +503,6 @@ async def run_broadcast(bot: Bot, report_chat: int, from_chat: int, msg_id: int)
         "✅ <b>Yuborish tugadi</b>\n\n"
         f"<pre>Yetkazildi   {ok}\nBloklagan    {blocked}\nXato         {failed}\nJami         {len(ids)}</pre>"
     )
-
-
-@dp.callback_query(F.data == "sub:check")
-async def on_sub_check(c: CallbackQuery):
-    if not CHANNEL or await is_member(c.bot, CHANNEL, c.from_user.id):
-        await c.answer("✅ Rahmat! Endi havolani yuboring", show_alert=True)
-        try:
-            await c.message.delete()
-        except Exception:  # noqa: BLE001
-            pass
-    else:
-        await c.answer("❌ Hali a'zo bo'lmadingiz", show_alert=True)
 
 
 MP3_WORD = re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
@@ -934,8 +853,6 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
     await db.init()
-    global CHANNEL
-    CHANNEL = await db.get_setting("channel")
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(setup_profile(bot))
     log.info("Bot ishga tushdi")
