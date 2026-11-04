@@ -1303,7 +1303,7 @@ async def on_other(m: Message):
 
 # ---------- Bot profilini avtomatik sozlash ----------
 BOT_NAME = "Forward Save"
-BOT_ABOUT = "Rasm/videolarni musiqasi bilan yuklab beraman 📥 👨‍💻 " + ADMIN
+BOT_ABOUT = "📥 Rasm, video va musiqa yuklab beraman\n⚡ Tez • 💎 HD • 🆓 Bepul\n👨‍💻 Admin: " + ADMIN
 BOT_DESCRIPTION = (
     "📥 Rasm va videolarni musiqasi bilan yuklab beraman\n\n"
     "📸 Instagram\n"
