@@ -396,11 +396,38 @@ def strip_bot_info(html_text: str) -> str:
     return "\n".join(kept).strip()
 
 
+_pinned_groups: set[str] = set()
+
+
+async def pin_latest(post: Message) -> None:
+    """Yangi postni pin qiladi va bot avval pin qilgan postni bo'shatadi — tepada doim oxirgi post turadi."""
+    if post.media_group_id:
+        if post.media_group_id in _pinned_groups:
+            return  # albomdan faqat bittasini pin qilamiz
+        _pinned_groups.add(post.media_group_id)
+        if len(_pinned_groups) > 500:
+            _pinned_groups.clear()
+    key = f"last_pin:{post.chat.id}"
+    try:
+        prev = await db.get_setting(key)
+        await post.bot.pin_chat_message(post.chat.id, post.message_id, disable_notification=True)
+        await db.set_setting(key, str(post.message_id))
+        if prev and prev.isdigit() and int(prev) != post.message_id:
+            try:
+                await post.bot.unpin_chat_message(post.chat.id, message_id=int(prev))
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("Postni pin qilib bo'lmadi: %s", e)
+
+
 @dp.channel_post()
 async def on_channel_post(post: Message):
-    """Brend kanalidagi har bir yangi post ostiga imzo qo'shadi (bot kanalda admin bo'lishi kerak)."""
+    """Brend kanalidagi har bir yangi post ostiga imzo qo'shadi va uni pin qiladi."""
     if (post.chat.username or "").lower() not in BRAND_CHANNELS:
         return
+    if not post.pinned_message:  # "pin qilindi" xizmat xabarini emas, haqiqiy postni
+        asyncio.create_task(pin_latest(post))
     try:
         if post.text is not None:
             raw = post.html_text
