@@ -92,6 +92,7 @@ def start_text(name: str) -> str:
         "📌 Pinterest  👻 Snapchat  📘 Facebook\n\n"
         "🔗 <b>Havolani yuboring — qolganini o'zim qilaman!</b>\n"
         "🎶 Video ostidagi tugma — musiqasini MP3 qilib beradi\n"
+        "🎧 Faqat musiqa kerakmi? <code>/mp3 havola</code> yoki havola + <b>mp3</b>\n"
         "🖼 Rasmlarni <b>original sifatda</b> fayl qilib ham olasiz\n"
         "💎 Videolar — 1080p gacha eng yuqori sifatda\n\n"
         f"👨‍💻 {ADMIN}"
@@ -345,9 +346,46 @@ async def on_help(m: Message):
         "2️⃣ Havolani shu yerga yuboring\n"
         "3️⃣ Bir necha soniyada video yoki rasm tayyor ✅\n"
         "4️⃣ 🎶 tugma bilan musiqasini MP3 qilib oling\n\n"
+        "🎧 <b>Faqat MP3 (videosiz):</b>\n"
+        "• <code>/mp3 havola</code>\n"
+        "• yoki havola yonida <b>mp3</b> deb yozing\n"
+        "• yoki havolaga javob qilib <code>/mp3</code> yozing\n\n"
         "👥 Guruhlarda ham ishlayman — meni guruhga qo'shing!\n\n"
         f"❓ Savollar: {ADMIN}"
     )
+
+
+MP3_WORD = re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
+
+
+@dp.message(Command("mp3"))
+async def on_mp3_command(m: Message):
+    found = URL_RE.search(m.text or "")
+    if not found and m.reply_to_message:
+        found = URL_RE.search(m.reply_to_message.text or m.reply_to_message.caption or "")
+    if not found:
+        await m.answer(
+            "🎶 <b>Faqat musiqa olish:</b>\n\n"
+            "<code>/mp3 havola</code> deb yozing\n"
+            "yoki havolaning oldiga/ortiga <b>mp3</b> so'zini qo'shing.\n\n"
+            "Masalan:\n<code>/mp3 https://www.tiktok.com/@.../video/...</code>"
+        )
+        return
+    url = found.group(0)
+    if not detect_site(url):
+        await m.answer("🤔 Bu saytni hali tanimayman.")
+        return
+    await react(m, "🎧")
+    await deliver_mp3(m, url, reply=True)
+
+
+@dp.message(F.text.regexp(URL_RE) & F.text.regexp(MP3_WORD))
+async def on_link_mp3(m: Message):
+    url = URL_RE.search(m.text).group(0)
+    if not detect_site(url):
+        return
+    await react(m, "🎧")
+    await deliver_mp3(m, url, reply=True)
 
 
 @dp.message(F.text.regexp(URL_RE))
@@ -440,19 +478,26 @@ async def on_mp3(c: CallbackQuery):
     if not url:
         await c.answer("⌛ Havola eskirgan, qaytadan yuboring.", show_alert=True)
         return
-    me = await c.bot.me()
+    await c.answer("🎶 Musiqa ajratilmoqda...")
+    await deliver_mp3(c.message, url)
+
+
+async def deliver_mp3(target: Message, url: str, reply: bool = False) -> None:
+    """Havoladan faqat musiqani (MP3) ajratib yuboradi."""
+    bot = target.bot
+    me = await bot.me()
     site = detect_site(url) or "Video"
     key = "mp3:" + cache_key(url)
+    send = target.reply_audio if reply else target.answer_audio
 
     if key in cache:
-        await c.answer("⚡ Tayyor!")
-        await c.message.answer_audio(cache[key]["file_id"], caption=f"🎶 Musiqa\n\n📥 @{me.username}")
+        await send(cache[key]["file_id"], caption=cache[key].get("cap") or f"🎶 Musiqa\n\n📥 @{me.username}")
         return
 
-    await c.answer("🎶 Musiqa ajratilmoqda...")
     stop = asyncio.Event()
-    typing = asyncio.create_task(keep_action(c.bot, c.message.chat.id, ChatAction.UPLOAD_VOICE, stop))
+    typing = asyncio.create_task(keep_action(bot, target.chat.id, ChatAction.UPLOAD_VOICE, stop))
     folder = None
+    t0 = time.monotonic()
     try:
         async with sem:
             folder, info = await download(url, site, audio=True)
@@ -460,18 +505,23 @@ async def on_mp3(c: CallbackQuery):
         audios = [a for a in audios if a.stat().st_size <= MAX_BYTES]
         if audios:
             title = html.escape((info.get("title") or "Musiqa")[:100])
-            r = await c.message.answer_audio(
+            author = info.get("uploader") or info.get("channel")
+            cap = f"🎶 <b>{title}</b>\n"
+            if author:
+                cap += f"👤 {html.escape(str(author)[:60])}\n"
+            cap += f"{SITE_EMOJI.get(site, '🌐')} {site}  •  ⚡ {time.monotonic() - t0:.1f} soniyada\n\n🔵🔴 <b>FORWARD SAVE</b> · @{me.username}"
+            r = await send(
                 FSInputFile(audios[0]),
                 title=info.get("title"),
-                performer=info.get("uploader"),
-                caption=f"🎶 <b>{title}</b>\n\n📥 @{me.username}",
+                performer=author,
+                caption=cap,
             )
-            cache[key] = {"file_id": r.audio.file_id}
+            cache[key] = {"file_id": r.audio.file_id, "cap": cap.split("  •  ⚡")[0] + f"\n\n🔵🔴 <b>FORWARD SAVE</b> · @{me.username}"}
         else:
-            await c.message.answer("😔 Bu videodan musiqani ajratib bo'lmadi.")
+            await target.answer("😔 Bu havoladan musiqani ajratib bo'lmadi.")
     except Exception as e:  # noqa: BLE001
         log.exception("MP3 xato: %s", e)
-        await c.message.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
+        await target.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
     finally:
         stop.set()
         typing.cancel()
@@ -546,6 +596,7 @@ async def setup_profile(bot: Bot) -> None:
     try:
         await bot.set_my_commands([
             BotCommand(command="start", description="🚀 Botni ishga tushirish"),
+            BotCommand(command="mp3", description="🎧 Faqat musiqa (MP3) olish"),
             BotCommand(command="help", description="📖 Qanday ishlatiladi"),
         ])
         await bot.set_my_description(description=BOT_DESCRIPTION)
