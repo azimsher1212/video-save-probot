@@ -553,9 +553,14 @@ async def setup_profile(bot: Bot) -> None:
         current = await bot.get_my_name()
         if current.name != BOT_NAME:
             await bot.set_my_name(name=BOT_NAME)
-            if AVATAR_IMG.exists():
-                await bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=FSInputFile(AVATAR_IMG)))
-            log.info("Bot profili yangilandi: nom, rasm, tavsif")
+        if AVATAR_IMG.exists():
+            # eski rasm tarixda to'planib qolmasligi uchun avval o'chiramiz
+            try:
+                await bot.remove_my_profile_photo()
+            except Exception:  # noqa: BLE001
+                pass
+            await bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=FSInputFile(AVATAR_IMG)))
+        log.info("Bot profili yangilandi: nom, rasm, tavsif")
     except Exception as e:  # noqa: BLE001
         log.warning("Profilni sozlab bo'lmadi: %s", e)
 
