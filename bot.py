@@ -371,7 +371,7 @@ BRAND_TEXT = (
 BRAND_CHANNELS = {c.strip().lstrip("@").lower() for c in os.getenv("BRAND_CHANNELS", "forwardtowardsdreams").split(",") if c.strip()}
 SIGN_MARK = "FORWARD® | Premium Brand"
 SIGNATURE = (
-    "\n\n➖➖➖➖➖➖➖➖➖➖➖➖\n"
+    "\n\n"
     f"🌐 <b>{SIGN_MARK}</b>\n"
     "✨ Premium sifatdagi mahsulot\n"
     "🌫️ Kafel • Qurilish materiallari\n"
@@ -451,7 +451,7 @@ post_wait: set[int] = set()
 sched_wait: set[int] = set()
 drafts: dict[int, dict] = {}
 SHORT_SIGN = (
-    f"\n\n➖➖➖➖➖➖➖➖➖➖➖➖\n🌐 <b>{SIGN_MARK}</b>\n"
+    f"\n\n🌐 <b>{SIGN_MARK}</b>\n"
     "🌫️ Kafel • Qurilish materiallari • Uskunalar\n"
     "📱 +998945650779 · +998934069707\n"
     f'📸 <a href="{BRAND_IG}">Instagram</a> | ✈️ <a href="{BRAND_TG}">Telegram</a> | ▶️ <a href="{BRAND_YT}">YouTube</a>'
