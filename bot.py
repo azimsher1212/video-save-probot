@@ -375,7 +375,7 @@ async def on_mp3_command(m: Message):
     if not detect_site(url):
         await m.answer("🤔 Bu saytni hali tanimayman.")
         return
-    await react(m, "🎧")
+    await react(m, "👌")
     await deliver_mp3(m, url, reply=True)
 
 
@@ -384,7 +384,7 @@ async def on_link_mp3(m: Message):
     url = URL_RE.search(m.text).group(0)
     if not detect_site(url):
         return
-    await react(m, "🎧")
+    await react(m, "👌")
     await deliver_mp3(m, url, reply=True)
 
 
