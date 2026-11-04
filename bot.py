@@ -371,11 +371,13 @@ BRAND_TEXT = (
 BRAND_CHANNELS = {c.strip().lstrip("@").lower() for c in os.getenv("BRAND_CHANNELS", "forwardtowardsdreams").split(",") if c.strip()}
 SIGN_MARK = "FORWARD® | Premium Brand"
 SIGNATURE = (
-    "\n\n━━━━━━━━━━━━━━━\n"
+    "\n\n➖➖➖➖➖➖➖➖➖➖\n"
     f"🌐 <b>{SIGN_MARK}</b>\n"
     "📱 +998945650779\n"
     "📱 +998934069707\n"
-    f'📸 <a href="{BRAND_IG}">Instagram</a>  |  ✈️ <a href="{BRAND_TG}">Telegram</a>  |  ▶️ <a href="{BRAND_YT}">YouTube</a>'
+    f'📸 <a href="{BRAND_IG}">Instagram</a>\n'
+    f'✈️ <a href="{BRAND_TG}">Telegram</a>\n'
+    f'▶️ <a href="{BRAND_YT}">YouTube</a>'
 )
 
 
