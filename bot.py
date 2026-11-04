@@ -373,8 +373,14 @@ SIGN_MARK = "FORWARD® | Premium Brand"
 SIGNATURE = (
     "\n\n➖➖➖➖➖➖➖➖➖➖\n"
     f"🌐 <b>{SIGN_MARK}</b>\n"
+    "✨ Premium sifatdagi mahsulot\n"
+    "🌫️ Kafel • Qurilish materiallari\n"
+    "🛠️ Professional uskunalar\n"
+    "💎 Ishonchli tanlov\n"
+    "💸 Eng maqbul narxlar\n"
+    "🚚 🇺🇿 bo‘ylab yetkazib berish\n\n"
     "📱 +998945650779\n"
-    "📱 +998934069707\n"
+    "📱 +998934069707\n\n"
     f'📸 <a href="{BRAND_IG}">Instagram</a>\n'
     f'✈️ <a href="{BRAND_TG}">Telegram</a>\n'
     f'▶️ <a href="{BRAND_YT}">YouTube</a>'
@@ -409,11 +415,11 @@ async def on_channel_post(post: Message):
         if post.text is not None:
             raw = post.html_text
             body = strip_bot_info(raw)
-            if SIGN_MARK in body or len(body) + 220 > 4096:
+            if SIGN_MARK in body:
                 if body != raw.strip():
                     await post.edit_text(body or "🌐", disable_web_page_preview=True)
                 return
-            await post.edit_text(body + SIGNATURE, disable_web_page_preview=True)
+            await post.edit_text(signed(body, "text"), disable_web_page_preview=True)
         elif post.caption is not None or (post.photo or post.video or post.document or post.audio or post.animation):
             if post.media_group_id and not post.caption:
                 return  # albomda imzo faqat matnli birinchi rasmga qo'yiladi
@@ -444,7 +450,12 @@ POST_CHANNEL = "@" + sorted(BRAND_CHANNELS)[0] if BRAND_CHANNELS else None
 post_wait: set[int] = set()
 sched_wait: set[int] = set()
 drafts: dict[int, dict] = {}
-SHORT_SIGN = f'\n\n🌐 <b>{SIGN_MARK}</b> · <a href="{BRAND_IG}">Instagram</a> | <a href="{BRAND_TG}">Telegram</a>'
+SHORT_SIGN = (
+    f"\n\n➖➖➖➖➖➖➖➖➖➖\n🌐 <b>{SIGN_MARK}</b>\n"
+    "🌫️ Kafel • Qurilish materiallari • Uskunalar\n"
+    "📱 +998945650779 · +998934069707\n"
+    f'📸 <a href="{BRAND_IG}">Instagram</a> | ✈️ <a href="{BRAND_TG}">Telegram</a> | ▶️ <a href="{BRAND_YT}">YouTube</a>'
+)
 
 
 def channel_buttons() -> InlineKeyboardMarkup:
