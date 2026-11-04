@@ -263,6 +263,7 @@ def build_caption(site: str, info: dict, username: str, seconds: float | None) -
     lines.append(meta)
     lines.append("")
     lines.append(f"🔵🔴 <b>FORWARD SAVE</b> · @{username}")
+    lines.append(f'🌐 <a href="{BRAND_TG}">FORWARD® | Premium Brand</a>')
     return "\n".join(lines)
 
 
@@ -348,13 +349,50 @@ async def send_items(m: Message, items: list[tuple[str, object]], cap: str, kb) 
 
 
 # ---------- Handlerlar ----------
+# ---------- FORWARD brendi ----------
+BRAND_IG = "https://www.instagram.com/forward.uzbekistan"
+BRAND_TG = "https://t.me/forwardtowardsdreams"
+BRAND_YT = "https://www.youtube.com/@FORWARD-9707"
+BRAND_TEXT = (
+    "🌐 <b>FORWARD® | Premium Brand</b>\n\n"
+    "✨ Premium sifatdagi mahsulot\n"
+    "🌫️ Kafel • Qurilish materiallari\n"
+    "🛠️ Professional uskunalar\n"
+    "💎 Ishonchli tanlov\n"
+    "💸 Eng maqbul narxlar\n"
+    "🚚 🇺🇿 bo‘ylab yetkazib berish\n\n"
+    "📱 <a href=\"tel:+998945650779\">+998 94 565 07 79</a>\n"
+    "📱 <a href=\"tel:+998934069707\">+998 93 406 97 07</a>"
+)
+
+
+def brand_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📸 Instagram", url=BRAND_IG),
+         InlineKeyboardButton(text="✈️ Telegram", url=BRAND_TG)],
+        [InlineKeyboardButton(text="▶️ YouTube", url=BRAND_YT)],
+    ])
+
+
+@dp.message(Command("about", "forward"))
+async def on_about(m: Message):
+    await m.answer(BRAND_TEXT, reply_markup=brand_kb(), disable_web_page_preview=True)
+
+
+@dp.callback_query(F.data == "brand")
+async def on_brand_cb(c: CallbackQuery):
+    await c.answer()
+    await c.message.answer(BRAND_TEXT, reply_markup=brand_kb(), disable_web_page_preview=True)
+
+
 @dp.message(CommandStart())
 async def on_start(m: Message):
     me = await m.bot.me()
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Guruhga qo'shish", url=bot_link(me.username))],
-            [InlineKeyboardButton(text="👨‍💻 Admin bilan bog'lanish", url=f"https://t.me/{ADMIN.lstrip('@')}")],
+            [InlineKeyboardButton(text="🌐 FORWARD® haqida", callback_data="brand"),
+             InlineKeyboardButton(text="👨‍💻 Admin", url=f"https://t.me/{ADMIN.lstrip('@')}")],
         ]
     )
     text = start_text(m.from_user.first_name if m.from_user else "do'stim")
@@ -807,6 +845,8 @@ BOT_DESCRIPTION = (
     "Insta, YouTube, TikTok, Pinterest, SnapChat, Facebook tarmoqlaridan "
     "rasm/videolarni musiqasi bilan yuklab beraman📥\n\n"
     "⚡ Tez  💎 1080p HD  🎶 MP3  🆓 Bepul\n\n"
+    "🌐 FORWARD® | Premium Brand — kafel, qurilish materiallari, professional uskunalar\n"
+    "📱 +998 94 565 07 79 · +998 93 406 97 07\n\n"
     f"👨‍💻: {ADMIN}"
 )
 AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
@@ -818,6 +858,7 @@ async def setup_profile(bot: Bot) -> None:
             BotCommand(command="start", description="🚀 Botni ishga tushirish"),
             BotCommand(command="mp3", description="🎧 Faqat musiqa (MP3) olish"),
             BotCommand(command="help", description="📖 Qanday ishlatiladi"),
+            BotCommand(command="about", description="🌐 FORWARD® haqida"),
         ])
         await bot.set_my_description(description=BOT_DESCRIPTION)
         await bot.set_my_short_description(short_description=BOT_ABOUT[:120])
