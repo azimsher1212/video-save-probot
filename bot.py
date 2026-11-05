@@ -30,6 +30,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    ChatMemberUpdated,
+    ChatPermissions,
     InputProfilePhotoStatic,
     ReactionTypeEmoji,
 )
@@ -124,6 +127,8 @@ def start_text(name: str) -> str:
         "🔗 Havola yuboring — video\n"
         "🎧 Havola + <b>mp3</b> — musiqa\n"
         "🔎 Qo'shiq nomi — qidiruv\n\n"
+        "👮 <b>Guruhga qo'shsangiz</b> — reklama, spam, arabcha xabar, kirdi-chiqdi va "
+        "so'kinishlardan tozalab turaman (/himoya)\n\n"
         f"👨‍💻 Admin: {ADMIN}"
     )
 
@@ -768,7 +773,8 @@ async def on_help(m: Message):
         "• <code>/mp3 havola</code>\n"
         "• yoki havola yonida <b>mp3</b> deb yozing\n"
         "• yoki havolaga javob qilib <code>/mp3</code> yozing\n\n"
-        "👥 Guruhlarda ham ishlayman — meni guruhga qo'shing!\n\n"
+        "👮 <b>Guruh qo'riqchisi:</b> meni guruhga qo'shib ADMIN qiling — reklama, spam, arabcha "
+        "xabarlar, arab botlar, kirdi-chiqdi va so'kinishlardan tozalayman. Sozlash: <code>/himoya</code>\n\n"
         f"❓ Savollar: {ADMIN}"
     )
 
@@ -1030,7 +1036,308 @@ async def on_group_link(m: Message):
     asyncio.create_task(warn_and_vanish(m, f"🚫 {who}, guruhda havola tashlash mumkin emas."))
 
 
-MP3_WORD = re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
+# ---------- Guruh qo'riqchisi: spam, arabcha, botlar, kirdi-chiqdi, so'kinish ----------
+GUARD_FEATURES = {
+    "link": "🔗 Reklama havolalari",
+    "spam": "🚫 Spam xabarlar",
+    "arab": "🇸🇦 Arabcha xabarlar",
+    "arabbot": "🤖 Arab akkaunt va botlar",
+    "joinleave": "🗑 Kirdi-chiqdi xabarlari",
+    "swear": "🔞 So'kinish (5 daqiqa jim)",
+}
+_guard_off: dict[int, set[str]] = {}
+_bot_member: dict[int, tuple[object, float]] = {}
+_flood: dict[tuple[int, int], list[float]] = {}
+_dups: dict[tuple[int, int], tuple[str, int, float]] = {}
+
+ARABIC_RE = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
+_B = r"(?<![a-zа-яё'])"  # so'z boshi
+SWEAR_RE = re.compile(
+    _B + r"(jalab|qo'?t[ao][gq]|dalba[yu]?[ao]b|qanjiq|haromi|gandon|pidar|pidor|mudak|blya|suka\b|xuy|pizd"
+    r"|sik(a|ay|ib|di|aman|ish|tir|vor)|onan(g|ni|gni)\s*(s|j)|yeban|ebat)"
+    r"|" + _B + r"(хуй|хуе|хуё|пизд|ёб|еба|ебл|бля|сука|суки|мудак|пидор|пидар|гандон|залуп|шлюх)",
+    re.IGNORECASE,
+)
+_extra = [w.strip().lower() for w in os.getenv("BAD_WORDS", "").split(",") if w.strip()]
+EXTRA_SWEAR_RE = re.compile(_B + "(" + "|".join(map(re.escape, _extra)) + ")", re.I) if _extra else None
+
+
+def norm_text(t: str) -> str:
+    return re.sub(r"[ʻʼ’‘`´]", "'", t.lower())
+
+
+def has_arabic(text: str) -> bool:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return False
+    ar = len(ARABIC_RE.findall(text))
+    return ar >= 3 and ar / len(letters) > 0.3
+
+
+def is_swear(text: str) -> bool:
+    t = norm_text(text)
+    return bool(SWEAR_RE.search(t) or (EXTRA_SWEAR_RE and EXTRA_SWEAR_RE.search(t)))
+
+
+async def guard_on(chat_id: int, feat: str) -> bool:
+    if feat == "link":
+        return await antilink_on(chat_id)
+    if chat_id not in _guard_off:
+        raw = await db.get_setting(f"guard:{chat_id}") or ""
+        _guard_off[chat_id] = {x for x in raw.split(",") if x}
+    return feat not in _guard_off[chat_id]
+
+
+async def guard_toggle(chat_id: int, feat: str) -> None:
+    if feat == "link":
+        off = await antilink_on(chat_id)
+        _antilink_off[chat_id] = off
+        await db.set_setting(f"antilink:{chat_id}", "off" if off else None)
+        return
+    await guard_on(chat_id, feat)
+    s = _guard_off[chat_id]
+    s.symmetric_difference_update({feat})
+    await db.set_setting(f"guard:{chat_id}", ",".join(sorted(s)) or None)
+
+
+async def bot_rights(bot: Bot, chat_id: int):
+    hit = _bot_member.get(chat_id)
+    if hit and hit[1] > time.monotonic():
+        return hit[0]
+    try:
+        cm = await bot.get_chat_member(chat_id, (await bot.me()).id)
+    except Exception:  # noqa: BLE001
+        cm = None
+    _bot_member[chat_id] = (cm, time.monotonic() + 600)
+    return cm
+
+
+def right(cm, name: str) -> bool:
+    return bool(cm) and cm.status == "administrator" and bool(getattr(cm, name, False))
+
+
+async def user_is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    key = (chat_id, user_id)
+    hit = _admin_cache.get(key)
+    if hit and hit[1] > time.monotonic():
+        return hit[0]
+    try:
+        ok = (await bot.get_chat_member(chat_id, user_id)).status in ("administrator", "creator")
+    except Exception:  # noqa: BLE001
+        ok = False
+    _admin_cache[key] = (ok, time.monotonic() + 300)
+    return ok
+
+
+async def silent_delete(m: Message) -> None:
+    try:
+        await m.delete()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Guard: o'chirib bo'lmadi: %s", e)
+
+
+def is_spam(m: Message) -> bool:
+    key = (m.chat.id, m.from_user.id)
+    now = time.monotonic()
+    if len(_flood) > 5000:
+        _flood.clear()
+        _dups.clear()
+    ts = [t for t in _flood.get(key, []) if now - t < 8] + [now]
+    _flood[key] = ts
+    if len(ts) > 5:  # 8 soniyada 5 tadan ko'p xabar — flood
+        return True
+    text = (m.text or m.caption or "").strip().lower()
+    if len(text) >= 5:
+        prev = _dups.get(key)
+        n = prev[1] + 1 if prev and prev[0] == text and now - prev[2] < 120 else 1
+        _dups[key] = (text, n, now)
+        if n >= 3:  # bir xil xabar 3-marta
+            return True
+    origin = m.forward_origin
+    if origin is not None and origin.type in ("channel", "chat"):  # boshqa kanaldan forward — reklama
+        return True
+    return False
+
+
+GROUP_INTRO = (
+    "👮 <b>Guruh qo'riqchisi ishga tushdi!</b>\n\n"
+    "🔗 Reklama havolalarini tozalayman\n"
+    "🚫 Spam xabarlarni tozalayman\n"
+    "🇸🇦 Arabcha xabarlarni o'chirib beraman\n"
+    "🤖 Arab botlardan himoya qilaman\n"
+    "🧹 Arabcha reklamalardan tozalayman\n"
+    "🗑 Kirdi-chiqdilarni tozalayman\n"
+    "🔞 So'kinganlarni 5 daqiqa faqat o'qish rejimiga tushiraman\n"
+    "📥 Instagram/TikTok/YouTube havolasidan videoni yuklab beraman\n\n"
+    "❗️ To'liq ishlashim uchun meni <b>ADMIN</b> qiling: <b>xabarlarni o'chirish</b> va "
+    "<b>foydalanuvchilarni cheklash</b> ruxsatlari bilan.\n\n"
+    "⚙️ Sozlash: /himoya"
+)
+
+
+async def on_new_members(m: Message) -> bool:
+    """Kirganlarni tekshiradi. True — xizmat xabarini o'chirish kerak."""
+    bot = m.bot
+    me = await bot.me()
+    cm = await bot_rights(bot, m.chat.id)
+    adder = m.from_user
+    adder_admin = bool(adder) and await user_is_admin(bot, m.chat.id, adder.id)
+    for u in m.new_chat_members or []:
+        if u.id == me.id:
+            _bot_member.pop(m.chat.id, None)
+            try:
+                await m.answer(GROUP_INTRO)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        if adder_admin and adder.id != u.id:
+            continue  # admin qo'shgan — tegmaymiz
+        name = f"{u.first_name or ''} {u.last_name or ''}"
+        bad = (u.is_bot and adder and adder.id != u.id) or bool(ARABIC_RE.search(name))
+        if bad and await guard_on(m.chat.id, "arabbot") and right(cm, "can_restrict_members"):
+            try:
+                await bot.ban_chat_member(m.chat.id, u.id)
+                log.info("Guard: chiqarildi %s (%s)", u.id, "bot" if u.is_bot else "arab")
+            except Exception as e:  # noqa: BLE001
+                log.warning("Guard: chiqarib bo'lmadi: %s", e)
+    return await guard_on(m.chat.id, "joinleave")
+
+
+class Guard(BaseMiddleware):
+    """Guruhdagi har bir xabarni tekshiradi: kerak bo'lsa o'chiradi va keyingi handlerga o'tkazmaydi."""
+
+    async def __call__(self, handler, event, data):
+        m = event
+        if not isinstance(m, Message) or m.chat.type not in GROUP_TYPES:
+            return await handler(event, data)
+        try:
+            # 1) kirdi-chiqdi xizmat xabarlari
+            if m.new_chat_members or m.left_chat_member:
+                delete = await on_new_members(m) if m.new_chat_members else await guard_on(m.chat.id, "joinleave")
+                if delete and right(await bot_rights(m.bot, m.chat.id), "can_delete_messages"):
+                    await silent_delete(m)
+                return None
+            if m.sender_chat or not m.from_user or m.from_user.is_bot:
+                return await handler(event, data)
+            text = m.text or m.caption or ""
+            if text.startswith("/"):
+                return await handler(event, data)
+
+            swear = bool(text) and is_swear(text)
+            arab = bool(text) and has_arabic(text)
+            spam = is_spam(m)
+            if not (swear or arab or spam):
+                return await handler(event, data)
+
+            cid = m.chat.id
+            want = (swear and await guard_on(cid, "swear")) or (arab and await guard_on(cid, "arab")) \
+                or (spam and await guard_on(cid, "spam"))
+            if not want or await is_group_admin(m):
+                return await handler(event, data)
+            cm = await bot_rights(m.bot, cid)
+            if not right(cm, "can_delete_messages"):
+                return await handler(event, data)
+
+            await silent_delete(m)
+            who = html.escape(m.from_user.first_name)
+            if swear and await guard_on(cid, "swear"):
+                muted = False
+                if right(cm, "can_restrict_members"):
+                    try:
+                        await m.bot.restrict_chat_member(
+                            cid, m.from_user.id, permissions=ChatPermissions(can_send_messages=False),
+                            until_date=timedelta(minutes=5),
+                        )
+                        muted = True
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("Guard: jim qilib bo'lmadi: %s", e)
+                asyncio.create_task(warn_and_vanish(
+                    m, f"🔞 {who}, so'kinish mumkin emas!" + (" 5 daqiqa faqat o'qiysiz 🤐" if muted else ""), 15))
+            return None
+        except Exception as e:  # noqa: BLE001
+            log.warning("Guard xatosi: %s", e)
+            return await handler(event, data)
+
+
+dp.message.outer_middleware(Guard())
+
+
+def guard_kb(states: dict[str, bool]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=("✅ " if states[k] else "❌ ") + v, callback_data=f"gd:{k}")]
+            for k, v in GUARD_FEATURES.items()]
+    rows.append([InlineKeyboardButton(text="✔️ Tayyor", callback_data="gd:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def guard_panel_text(bot: Bot, chat_id: int) -> str:
+    cm = await bot_rights(bot, chat_id)
+    d = "✅" if right(cm, "can_delete_messages") else "❌"
+    r = "✅" if right(cm, "can_restrict_members") else "❌"
+    return (
+        "👮 <b>Guruh himoyasi</b>\n\n"
+        f"🗑 Xabarlarni o'chirish ruxsati: {d}\n"
+        f"🔇 Foydalanuvchilarni cheklash ruxsati: {r}\n\n"
+        "Yoqish/o'chirish uchun tugmani bosing 👇"
+    )
+
+
+@dp.message(Command("himoya", "guard", "sozlama"))
+async def on_guard_cmd(m: Message):
+    if m.chat.type not in GROUP_TYPES:
+        me = await m.bot.me()
+        await m.answer(
+            GROUP_INTRO.replace("⚙️ Sozlash: /himoya", "⚙️ Guruhda /himoya yozib sozlaysiz"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="➕ Guruhga qo'shish", url=bot_link(me.username))]]),
+        )
+        return
+    if not await is_group_admin(m):
+        return
+    _bot_member.pop(m.chat.id, None)
+    states = {k: await guard_on(m.chat.id, k) for k in GUARD_FEATURES}
+    await m.answer(await guard_panel_text(m.bot, m.chat.id), reply_markup=guard_kb(states))
+
+
+@dp.callback_query(F.data.startswith("gd:"))
+async def on_guard_cb(c: CallbackQuery):
+    chat_id = c.message.chat.id
+    if not await user_is_admin(c.bot, chat_id, c.from_user.id):
+        await c.answer("Faqat guruh adminlari uchun 🔒", show_alert=True)
+        return
+    feat = c.data[3:]
+    if feat == "close":
+        await c.answer("Saqlandi ✅")
+        try:
+            await c.message.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if feat not in GUARD_FEATURES:
+        await c.answer()
+        return
+    await guard_toggle(chat_id, feat)
+    states = {k: await guard_on(chat_id, k) for k in GUARD_FEATURES}
+    await c.answer(("Yoqildi ✅ " if states[feat] else "O'chirildi ❌ ") + GUARD_FEATURES[feat])
+    try:
+        await c.message.edit_text(await guard_panel_text(c.bot, chat_id), reply_markup=guard_kb(states))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@dp.my_chat_member()
+async def on_my_rights_change(event: ChatMemberUpdated):
+    _bot_member.pop(event.chat.id, None)
+    _bot_rights.pop(event.chat.id, None)
+    new = event.new_chat_member
+    old = event.old_chat_member
+    if event.chat.type in GROUP_TYPES and new.status == "administrator" and old.status != "administrator":
+        try:
+            await event.bot.send_message(event.chat.id, "✅ Rahmat! Endi guruhni to'liq qo'riqlayman 👮\n⚙️ Sozlash: /himoya")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+MP3_WORD =re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
 
 
 @dp.message(Command("mp3"))
@@ -1344,6 +1651,7 @@ BOT_DESCRIPTION = (
     "💎 1080p HD\n"
     "🎶 MP3\n"
     "🆓 Bepul\n\n"
+    "👮 Guruhni reklama, spam, arabcha xabar, kirdi-chiqdi va so'kinishlardan tozalayman\n\n"
     f"👨‍💻 Admin: {ADMIN}"
 )
 AVATAR_IMG = Path(__file__).parent / "assets" / "avatar.jpg"
@@ -1382,6 +1690,11 @@ async def setup_profile(bot: Bot) -> None:
             BotCommand(command="help", description="📖 Qanday ishlatiladi"),
             BotCommand(command="about", description="🌐 FORWARD® haqida"),
         ])
+        await bot.set_my_commands([
+            BotCommand(command="himoya", description="👮 Guruh himoyasini sozlash"),
+            BotCommand(command="antilink", description="🔗 Havolalarni tozalash"),
+            BotCommand(command="mp3", description="🎧 Faqat musiqa (MP3) olish"),
+        ], scope=BotCommandScopeAllChatAdministrators())
         await bot.set_my_description(description=BOT_DESCRIPTION)
         await bot.set_my_short_description(short_description=BOT_ABOUT[:120])
         current = await bot.get_my_name()
