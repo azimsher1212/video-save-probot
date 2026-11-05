@@ -854,6 +854,21 @@ async def on_admin_cb(c: CallbackQuery):
         await c.message.edit_text("❌ Yuborish bekor qilindi.")
 
 
+@dp.message(Command("gif"), F.func(lambda m: is_admin(m.from_user)))
+async def on_desc_gif(m: Message):
+    """BotFather 'Description Picture' uchun: GIF va rasmni yuboradi — uni BotFather'ga forward qilasiz."""
+    base = Path(__file__).parent / "assets"
+    try:
+        await m.answer_animation(FSInputFile(base / "desc_anim.mp4", filename="forward.mp4"), width=320, height=180,
+                                 caption="🎬 GIF (320×180) — shuni @BotFather ga forward qiling")
+    except Exception as e:  # noqa: BLE001
+        await m.answer(f"GIF yuborilmadi: {html.escape(str(e))}")
+    try:
+        await m.answer_photo(FSInputFile(base / "desc_photo.jpg"), caption="🖼 Rasm varianti (640×360)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @dp.message(Command("cancel"), F.func(lambda m: is_admin(m.from_user)))
 async def on_cancel(m: Message):
     broadcast_wait.discard(m.from_user.id)
