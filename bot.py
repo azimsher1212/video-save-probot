@@ -1340,6 +1340,16 @@ async def on_my_rights_change(event: ChatMemberUpdated):
 MP3_WORD =re.compile(r"(^|\s)/?(mp3|musiqa|audio)(@\w+)?(\s|$)", re.IGNORECASE)
 
 
+async def drop_link(m: Message) -> None:
+    """Media yuborilgach, foydalanuvchi tashlagan havolani o'chiradi (chat toza turadi)."""
+    try:
+        if m.chat.type != "private" and not await can_delete(m):
+            return
+        await m.delete()
+    except Exception as e:  # noqa: BLE001
+        log.info("Havolani o'chirib bo'lmadi: %s", e)
+
+
 @dp.message(Command("mp3"))
 async def on_mp3_command(m: Message):
     found = URL_RE.search(m.text or "")
@@ -1358,7 +1368,8 @@ async def on_mp3_command(m: Message):
         await m.answer("🤔 Bu saytni hali tanimayman.")
         return
     await react(m, "👌")
-    await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0)
+    if await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0):
+        await drop_link(m)
 
 
 @dp.message(F.text.regexp(URL_RE) & F.text.regexp(MP3_WORD))
@@ -1367,7 +1378,8 @@ async def on_link_mp3(m: Message):
     if not detect_site(url):
         return
     await react(m, "👌")
-    await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0)
+    if await deliver_mp3(m, url, reply=True, user_id=m.from_user.id if m.from_user else 0):
+        await drop_link(m)
 
 
 @dp.message(F.text.regexp(URL_RE))
@@ -1393,8 +1405,8 @@ async def on_link(m: Message):
         kinds = {k for k, _ in c["items"]}
         try:
             await send_items(m, c["items"], c["cap"], action_kb(url, me.username, "video" in kinds, "photo" in kinds))
-            await react(m, "⚡")
             track(m.from_user.id if m.from_user else 0, m.chat.type, site, "kesh", True, 0)
+            await drop_link(m)
             return
         except Exception as e:  # noqa: BLE001
             log.warning("Keshdan yuborib bo'lmadi: %s", e)
@@ -1447,9 +1459,9 @@ async def on_link(m: Message):
         if len(cache) > 3000:
             cache.clear()
         cache[key] = {"items": sent, "cap": build_caption(site, info, me.username, None)}
-        await react(m, "🔥")
         track(m.from_user.id if m.from_user else 0, m.chat.type, site,
               "video" if "video" in kinds else "rasm", True, time.monotonic() - t0)
+        await drop_link(m)
     except Exception as e:  # noqa: BLE001
         log.exception("Yuborishda xato: %s", e)
         await react(m, "😢")
@@ -1475,7 +1487,7 @@ async def on_mp3(c: CallbackQuery):
     await deliver_mp3(c.message, url, user_id=c.from_user.id)
 
 
-async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: int = 0) -> None:
+async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: int = 0) -> bool:
     """Havoladan faqat musiqani (MP3) ajratib yuboradi."""
     bot = target.bot
     me = await bot.me()
@@ -1485,7 +1497,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
 
     if key in cache:
         await send(cache[key]["file_id"], caption=cache[key].get("cap") or f"🎶 Musiqa\n\n📥 @{me.username}")
-        return
+        return True
 
     stop = asyncio.Event()
     typing = asyncio.create_task(keep_action(bot, target.chat.id, ChatAction.UPLOAD_VOICE, stop))
@@ -1508,6 +1520,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
             )
             track(user_id, target.chat.type, site, "mp3", True, time.monotonic() - t0)
             cache[key] = {"file_id": r.audio.file_id, "cap": cap}
+            return True
         else:
             track(user_id, target.chat.type, site, "mp3", False, time.monotonic() - t0)
             await target.answer("😔 Bu havoladan musiqani ajratib bo'lmadi.")
@@ -1519,6 +1532,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
         typing.cancel()
         if folder:
             shutil.rmtree(folder, ignore_errors=True)
+    return False
 
 
 @dp.callback_query(F.data.startswith("hd:"))
