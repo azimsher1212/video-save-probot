@@ -5,6 +5,7 @@ musiqasi bilan yuklab beruvchi Telegram bot.
 👨‍💻 @Forward_admin1
 """
 import asyncio
+import hashlib
 import html
 import logging
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 import yt_dlp
@@ -37,6 +39,7 @@ from aiogram.types import (
     ReactionTypeEmoji,
 )
 from aiogram.utils.media_group import MediaGroupBuilder
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("probot")
@@ -1731,24 +1734,72 @@ async def health(_request):
     return web.Response(text="Forward Save bot ishlayapti ✅")
 
 
+# Webhook: Render o'zi RENDER_EXTERNAL_URL beradi; boshqa joyda WEBHOOK_URL ni qo'ying.
+# Ikkalasi ham bo'lmasa (masalan, kompyuterda) — eski polling rejimi ishlaydi.
+WEBHOOK_BASE = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+WEBHOOK_PATH = "/tg-webhook"
+# 1-qoida: faqat Telegram'dan kelgan so'rovlar (shu maxfiy token bilan) qabul qilinadi.
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:48]
+
+
+class DedupUpdates(BaseMiddleware):
+    """3-qoida: Telegram bitta update'ni qayta yuborsa, ikkinchi marta ishlanmaydi."""
+
+    def __init__(self, keep: int = 5000):
+        self.seen: OrderedDict[int, None] = OrderedDict()
+        self.keep = keep
+
+    async def __call__(self, handler, event, data):
+        uid = getattr(event, "update_id", None)
+        if uid is not None:
+            if uid in self.seen:
+                log.info("Takroriy update o'tkazib yuborildi: %s", uid)
+                return None
+            self.seen[uid] = None
+            if len(self.seen) > self.keep:
+                self.seen.popitem(last=False)
+        return await handler(event, data)
+
+
 async def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN o'rnatilmagan!")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp.update.outer_middleware(DedupUpdates())
 
     app = web.Application()
     app.router.add_get("/", health)
+    if WEBHOOK_BASE:
+        # 2-qoida: handle_in_background=True — Telegram'ga darhol 200 qaytadi,
+        # yuklab olish kabi og'ir ish keyin fonda bajariladi.
+        SimpleRequestHandler(
+            dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET, handle_in_background=True
+        ).register(app, path=WEBHOOK_PATH)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
     await db.init()
-    await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(setup_profile(bot))
     asyncio.create_task(setup_channel_bio(bot))
     asyncio.create_task(scheduler(bot))
-    log.info("Bot ishga tushdi")
-    await dp.start_polling(bot)
+
+    if WEBHOOK_BASE:
+        # Kutib turgan xabarlar o'chirilmaydi: server uxlab yotganda kelgan xabar
+        # aynan uni uyg'otadi va javobsiz qolmasligi kerak.
+        await bot.set_webhook(
+            url=WEBHOOK_BASE + WEBHOOK_PATH,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=dp.resolve_used_update_types(),
+            drop_pending_updates=False,
+        )
+        await dp.emit_startup(bot=bot)
+        log.info("Bot webhook rejimida ishga tushdi: %s%s", WEBHOOK_BASE, WEBHOOK_PATH)
+        await asyncio.Event().wait()  # server to'xtatilguncha ishlaydi
+    else:
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("Bot polling rejimida ishga tushdi")
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":

@@ -40,7 +40,14 @@ python bot.py
 3. Environment: `BOT_TOKEN` = tokeningiz
 4. Deploy. Tayyor ✅
 
-> Render'ning bepul tarifi faoliyatsiz qolganda "uxlaydi". Doimiy ishlashi uchun pullik tarif yoki VPS (Hetzner, Timeweb, va h.k.) tavsiya qilinadi.
+Render'da bot avtomatik **webhook** rejimida ishlaydi (Render bergan `RENDER_EXTERNAL_URL` orqali). Bepul tarifda server uxlab qolsa ham, yangi xabar kelganda Telegram uni o'zi uyg'otadi — xabar yo'qolmaydi (birinchi javob ~30–50 soniya kechikishi mumkin).
+
+Webhook himoyasi:
+- faqat maxfiy token bilan kelgan so'rovlar qabul qilinadi (soxta so'rovlar 401 oladi);
+- Telegram'ga darhol 200 qaytariladi, yuklab olish fonda bajariladi;
+- bir xil xabar ikki marta kelsa, bir marta ishlanadi.
+
+Kompyuterda (`WEBHOOK_URL` / `RENDER_EXTERNAL_URL` yo'q bo'lsa) bot eskicha polling rejimida ishlaydi.
 
 ## Sozlamalar (environment)
 | O'zgaruvchi | Vazifasi | Standart |
@@ -49,6 +56,8 @@ python bot.py
 | `ADMIN_USERNAME` | Xabarlarda ko'rinadigan admin | `@Forward_admin1` |
 | `COOKIES_FILE` | cookies.txt yo'li | yo'q |
 | `MAX_PARALLEL` | Bir vaqtdagi yuklashlar soni | `3` |
+| `WEBHOOK_URL` | Render'dan boshqa serverda webhook manzili (masalan `https://bot.example.com`) | Render'da avtomatik |
+| `WEBHOOK_SECRET` | Webhook maxfiy tokeni | tokendan avtomatik |
 
 ## Muhim eslatmalar
 - **50 MB limiti:** Telegram oddiy botlarga 50 MB gacha fayl yuborishga ruxsat beradi. Shuning uchun YouTube videolar 720p gacha yuklanadi. 2 GB gacha kerak bo'lsa — o'zingizning *Local Bot API Server*ingizni ko'tarish kerak.
