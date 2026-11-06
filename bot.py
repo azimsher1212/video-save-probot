@@ -389,6 +389,8 @@ async def weather(query: str) -> str:
         f"https://api.open-meteo.com/v1/forecast?latitude={p['latitude']}&longitude={p['longitude']}"
         "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m"
         "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=3")
+    if "current" not in w:
+        raise RuntimeError(f"open-meteo: {str(w)[:200]}")
     c, d = w["current"], w["daily"]
     lines = [f"{p['name']} ob-havosi (hozir, {c['time']}): {c['temperature_2m']}°C, his qilinishi {c['apparent_temperature']}°C, "
              f"{WMO.get(c['weather_code'], '')}, shamol {c['wind_speed_10m']} km/soat, namlik {c['relative_humidity_2m']}%"]
@@ -440,7 +442,7 @@ async def web_search(query: str, n: int = 6) -> str:
                             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                                    "(KHTML, like Gecko) Chrome/130.0 Safari/537.36",
                                      "Accept-Language": "uz,ru;q=0.8,en;q=0.6"},
-                            timeout=aiohttp.ClientTimeout(total=12)) as r:
+                            timeout=aiohttp.ClientTimeout(total=6)) as r:
             page = await r.text()
         links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S)
         links = [(urllib.parse.unquote(re.sub(r"^.*?uddg=([^&]+).*$", r"\1", u)), t) for u, t in links]
@@ -511,7 +513,8 @@ def img_headers() -> dict:
 async def pick_image_provider():
     global IMG_PROVIDER, IMG_OK
     for i, tpl in enumerate(IMG_PROVIDERS):
-        url = tpl.format(p=urllib.parse.quote("red apple on a wooden table"), w=512, h=512, seed=42)
+        url = tpl.format(p=urllib.parse.quote(f"red apple on a wooden table {os.urandom(2).hex()}"), w=512, h=512,
+                         seed=int.from_bytes(os.urandom(3), "big"))
         try:
             async with http.get(url, timeout=aiohttp.ClientTimeout(total=60), headers=img_headers()) as r:
                 ok = r.status == 200 and r.headers.get("content-type", "").startswith("image/")
@@ -1293,8 +1296,13 @@ async def run_selftest(which: str | None = None) -> dict:
         return r[:150]
 
     async def live():
-        a, b, c = await asyncio.gather(cbu_rates(), weather("Toshkent ob-havo"), wiki("Samarqand"))
-        return f"{a[:80]} | {b[:80]} | {c[:60]}"
+        out = []
+        for name, co in (("cbu", cbu_rates()), ("weather", weather("Toshkent ob-havo")), ("wiki", wiki("Samarqand"))):
+            try:
+                out.append(f"{name}=OK {(await co)[:70]}")
+            except Exception as e:
+                out.append(f"{name}=FAIL {type(e).__name__}: {str(e)[:120]}")
+        return " | ".join(out)
 
     async def tg():
         me = await bot.get_me()
