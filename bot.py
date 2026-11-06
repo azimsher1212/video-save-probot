@@ -345,6 +345,13 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
         contents[-1] = types.Content(role="user", parts=parts + [types.Part.from_text(text=extra)])
         resp = await gemini(contents, config, timeout=75)
     answer = resp_text(resp)
+    if answer.startswith("Javob olinmadi"):
+        try:
+            log.info("bo'sh javob: %s", getattr(resp.candidates[0], "finish_reason", "?") if resp.candidates else "no candidates")
+            config.thinking_config = None
+            answer = resp_text(await gemini(contents, config, model=FAST_MODEL, timeout=60))
+        except Exception as e:
+            log.warning("empty retry: %s", e)
     if hist is not None:
         return answer
     user_text = " ".join(p.text for p in parts if p.text) or "[media]"
@@ -373,7 +380,19 @@ async def _get_json(url: str, timeout: float = 10):
 
 
 async def cbu_rates() -> str:
-    data = await _get_json("https://cbu.uz/uz/arkhiv-kursov-valyut/json/")
+    try:
+        return await _cbu()
+    except Exception as e:
+        log.info("cbu: %s", e)
+    j = await _get_json("https://open.er-api.com/v6/latest/USD")
+    r = j["rates"]
+    uzs = r["UZS"]
+    rows = [f"1 {c} = {uzs / r[c]:,.2f} so'm".replace(",", " ") for c in ("USD", "EUR", "RUB", "CNY", "KZT", "TRY", "GBP", "AED", "KRW") if c in r]
+    return f"Valyuta kurslari ({j.get('time_last_update_utc', '')[:16]}):\n" + "\n".join(rows) + " (manba: open.er-api.com, bozor kursi)"
+
+
+async def _cbu() -> str:
+    data = await _get_json("https://cbu.uz/uz/arkhiv-kursov-valyut/json/", timeout=5)
     want = {"USD", "EUR", "RUB", "CNY", "KZT", "TRY", "GBP", "AED", "KRW"}
     rows = [f"1 {d['Ccy']} = {d['Rate']} so'm ({'+' if not str(d.get('Diff', '')).startswith('-') else ''}{d.get('Diff')})"
             for d in data if d.get("Ccy") in want]
@@ -381,6 +400,22 @@ async def cbu_rates() -> str:
 
 
 async def weather(query: str) -> str:
+    try:
+        return await _meteo(query)
+    except Exception as e:
+        log.info("open-meteo: %s", e)
+    low = query.lower()
+    city = next((v for k, v in UZ_CITIES.items() if k in low), "Tashkent")
+    j = await _get_json(f"https://wttr.in/{urllib.parse.quote(city)}?format=j1&lang=uz", timeout=10)
+    c = j["current_condition"][0]
+    lines = [f"{city} ob-havosi (hozir): {c['temp_C']}°C, his qilinishi {c['FeelsLikeC']}°C, "
+             f"{c['weatherDesc'][0]['value']}, shamol {c['windspeedKmph']} km/soat, namlik {c['humidity']}%"]
+    for d in j.get("weather", [])[:3]:
+        lines.append(f"{d['date']}: {d['mintempC']}…{d['maxtempC']}°C")
+    return "\n".join(lines) + " (manba: wttr.in)"
+
+
+async def _meteo(query: str) -> str:
     low = query.lower()
     city = next((v for k, v in UZ_CITIES.items() if k in low), "Tashkent")
     g = await _get_json(f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1")
@@ -491,6 +526,8 @@ async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) 
     if style:
         en += ", " + style
     seed = int.from_bytes(os.urandom(3), "big")
+    k = min(1.0, IMG_MAX_SIDE / max(w, h))
+    w, h = int(w * k) // 16 * 16, int(h * k) // 16 * 16
     return IMG_PROVIDERS[IMG_PROVIDER].format(p=urllib.parse.quote(en[:900]), w=w, h=h, seed=seed)
 
 
@@ -503,6 +540,7 @@ IMG_PROVIDERS = [
 ]
 IMG_PROVIDER = 0
 IMG_OK = True
+IMG_MAX_SIDE = 1024
 POLLINATIONS_KEY = os.getenv("POLLINATIONS_KEY", "")
 
 
@@ -511,17 +549,18 @@ def img_headers() -> dict:
 
 
 async def pick_image_provider():
-    global IMG_PROVIDER, IMG_OK
-    for i, tpl in enumerate(IMG_PROVIDERS):
-        url = tpl.format(p=urllib.parse.quote(f"red apple on a wooden table {os.urandom(2).hex()}"), w=512, h=512,
+    global IMG_PROVIDER, IMG_OK, IMG_MAX_SIDE
+    for i, side in [(i, sd) for sd in (1024, 768, 512) for i in range(len(IMG_PROVIDERS))]:
+        tpl = IMG_PROVIDERS[i]
+        url = tpl.format(p=urllib.parse.quote(f"red apple on a wooden table {os.urandom(2).hex()}"), w=side, h=side,
                          seed=int.from_bytes(os.urandom(3), "big"))
         try:
             async with http.get(url, timeout=aiohttp.ClientTimeout(total=60), headers=img_headers()) as r:
                 ok = r.status == 200 and r.headers.get("content-type", "").startswith("image/")
                 body = "" if ok else (await r.text())[:200]
-                log.info("image provider %s: %s %s %s", i, r.status, r.headers.get("content-type"), body)
+                log.info("image provider %s @%s: %s %s %s", i, side, r.status, r.headers.get("content-type"), body)
                 if ok:
-                    IMG_PROVIDER, IMG_OK = i, True
+                    IMG_PROVIDER, IMG_OK, IMG_MAX_SIDE = i, True, side
                     return
         except Exception as e:
             log.info("image provider %s: %s", i, e)
