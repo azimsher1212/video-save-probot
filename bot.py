@@ -607,26 +607,43 @@ async def pick_image_provider():
     IMG_OK = False
 
 
+IMG_LOCK = asyncio.Lock()
+IMG_LAST = 0.0
+IMG_GAP = float(os.getenv("IMG_GAP", "46"))  # bepul tarif: bitta IP'dan 45 soniyada 1 rasm
+
+
+def img_wait_seconds() -> int:
+    return max(0, int(IMG_LAST + IMG_GAP - time.time()))
+
+
 async def fetch_image(url: str) -> bytes:
-    last = None
-    for attempt in range(3):
-        try:
-            if attempt == 0:
-                u = url
-            else:  # boshqa manba bilan qayta urinish
-                q = re.search(r"/(?:prompt|image)/([^?]+)", url)
-                wh = re.search(r"width=(\d+)&height=(\d+)", url)
-                tpl = IMG_PROVIDERS[(IMG_PROVIDER + attempt) % len(IMG_PROVIDERS)]
-                u = tpl.format(p=q.group(1) if q else "art", w=wh.group(1) if wh else 1024,
-                               h=wh.group(2) if wh else 1024, seed=int.from_bytes(os.urandom(3), "big"))
-            async with http.get(u, timeout=aiohttp.ClientTimeout(total=90), headers=img_headers()) as r:
-                if r.status == 200 and r.headers.get("content-type", "").startswith("image/"):
-                    return await r.read()
-                last = RuntimeError(f"status {r.status}")
-        except Exception as e:
-            last = e
-        await asyncio.sleep(1)
-    raise last
+    """Rasmlarni navbat bilan oladi: bepul limitga urilsa, aytilgan vaqtni kutib qayta uradi."""
+    global IMG_LAST
+    async with IMG_LOCK:
+        if not POLLINATIONS_KEY:
+            await asyncio.sleep(img_wait_seconds())
+        last = None
+        for attempt in range(4):
+            try:
+                async with http.get(url, timeout=aiohttp.ClientTimeout(total=120), headers=img_headers()) as r:
+                    ctype = r.headers.get("content-type", "")
+                    if r.status == 200 and ctype.startswith("image/"):
+                        data = await r.read()
+                        IMG_LAST = time.time()
+                        return data
+                    body = (await r.text())[:300]
+                    last = RuntimeError(f"status {r.status}: {body[:120]}")
+                    m = re.search(r"[Rr]etry after (\d+)", body)
+                    wait = int(m.group(1)) + 1 if m else 8
+                    log.info("image %s, %ss kutamiz", r.status, wait)
+                    if r.status not in (402, 429, 500, 502, 503) or wait > 60:
+                        break
+                    await asyncio.sleep(wait)
+            except Exception as e:
+                last = e
+                await asyncio.sleep(3)
+        IMG_LAST = time.time()
+        raise last
 
 
 def redraw_kb() -> InlineKeyboardMarkup:
@@ -643,7 +660,9 @@ IMG_OFF_TEXT = ("🎨 Rasm chizish xizmati hozir texnik sozlanmoqda va tez orada
 async def generate_image(m: Message, prompt: str, user_id: int | None = None):
     if not IMG_OK:
         return await m.answer(IMG_OFF_TEXT)
-    note = await m.answer("🎨 Chizilmoqda... (10–30 soniya)")
+    wait = img_wait_seconds() + (IMG_GAP if IMG_LOCK.locked() else 0)
+    note = await m.answer(f"🎨 Navbatdasiz, taxminan {int(wait) + 15} soniyada tayyor bo'ladi..." if wait > 5
+                          else "🎨 Chizilmoqda... (10–30 soniya)")
     try:
         async with busy(m.chat.id, "upload_photo"):
             url = await image_url(prompt)
@@ -1431,7 +1450,7 @@ async def pick_models():
 async def selftest_on_start():
     await asyncio.sleep(1)
     try:
-        r = await run_selftest()
+        r = await run_selftest(os.getenv("SELFTEST_ONLY") or None)
         for k, v in r.items():
             log.info("SELFTEST %s %s", "OK " if v.get("ok") else "FAIL", f"{k} {v}")
     except Exception as e:
@@ -1461,14 +1480,7 @@ async def on_startup(*_, **__):
     except Exception as e:
         log.warning("set name: %s", e)
     async def boot():
-        global IMG_OK
-        await asyncio.gather(pick_models(), pick_image_provider())
-        if IMG_OK:  # haqiqiy rasm chizishni sinab ko'ramiz (bepul tarifda "to'lov kerak" qaytishi mumkin)
-            try:
-                await fetch_image(await image_url("blue sky over mountains"))
-            except Exception as e:
-                IMG_OK = False
-                log.warning("Rasm xizmati o'chirildi: %s (POLLINATIONS_KEY kerak)", e)
+        await pick_models()
         if os.getenv("SELFTEST_ON_START") == "1":
             await selftest_on_start()
     asyncio.create_task(boot())
