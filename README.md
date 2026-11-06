@@ -1,14 +1,7 @@
-# FORWARD AI — Telegram bot + Google Gemini (bepul)
+# FORWARD AI — @Forward_Ai_chibot
 
-## Kerakli kalitlar (ikkalasi ham bepul)
-1. **BOT_TOKEN** — @BotFather'dan
-2. **GEMINI_API_KEY** — aistudio.google.com/apikey → "Create API key"
+Telegram bot + Google Gemini (bepul). Render (Free) da webhook rejimida ishlaydi, ma'lumotlar Supabase'da (fai_* jadvallar).
 
-## Render'ga joylash (Free tarif)
-- Web Service, Build: `pip install -r requirements.txt`, Start: `python bot.py`
-- Environment: `BOT_TOKEN`, `GEMINI_API_KEY`
-- Ixtiyoriy: `BAD_WORDS` (vergul bilan), `AI_MODERATION=1`, `CHAT_MODEL`
+Imkoniyatlar: 8 rejim (Yordamchi, Internet, Rasm yaratish, Tarjimon, Biznes, Kreativ, Dasturchi, O'qituvchi), rasm tahlili, ovozli xabar, ovozda javob, PDF/Word/Excel/TXT, video, YouTube xulosasi, guruh moderatsiyasi, kunlik limit, Telegram Stars premium, admin buyruqlari (/admin, /broadcast, /give, /ban).
 
-## Guruhda
-- Botni admin qiling (xabar o'chirish huquqi)
-- @BotFather → /setprivacy → Disable
+Env: BOT_TOKEN, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY, DB_SECRET, ADMIN_USERNAMES, FREE_LIMIT, PREMIUM_STARS, PREMIUM_DAYS, REQUIRED_CHANNEL, BAD_WORDS, AI_MODERATION
