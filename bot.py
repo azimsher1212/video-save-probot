@@ -1511,6 +1511,7 @@ def main():
         app.router.add_get("/", lambda r: web.Response(text="FORWARD AI ishlayapti"))
         app.router.add_get("/app", webapp_page)
         app.router.add_get("/app/mark.png", lambda r: web.FileResponse(WEBAPP_HTML.with_name("mark.png")))
+        app.router.add_get("/app/mascot.png", lambda r: web.FileResponse(WEBAPP_HTML.with_name("mascot.png")))
         app.router.add_get("/selftest", selftest)
         app.router.add_get("/img/{key}.jpg", img_cached)
         for path, fn in (("me", api_me), ("chat", api_chat), ("image", api_image), ("tts", api_tts), ("invoice", api_invoice)):

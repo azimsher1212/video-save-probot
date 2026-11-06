@@ -202,7 +202,7 @@ h2 small{font-family:Inter,system-ui,sans-serif;font-size:12px;color:var(--muted
 <div class="bg"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="grain"></div></div>
 
 <div class="splash" id="splash"><div class="in">
-  <img src="/app/mark.png" alt="FORWARD" style="width:120px">
+  <img src="/app/mascot.png" alt="Forward Ai" style="width:150px;border-radius:50%;box-shadow:0 0 40px rgba(60,130,255,.6)">
   <b>FORWARD AI</b><small>Towards Dreams</small>
 </div></div>
 
@@ -219,7 +219,7 @@ h2 small{font-family:Inter,system-ui,sans-serif;font-size:12px;color:var(--muted
 
     <div class="hero">
       <div class="hero-img" id="heroImg"></div>
-      <div class="orb"></div><div class="orb-core"></div>
+      <div class="orb"></div><img src="/app/mascot.png" alt="" style="position:absolute;right:-6px;top:-6px;width:150px;height:150px;border-radius:50%;z-index:1;animation:bob 3s ease-in-out infinite">
       <h1>Bugun nima <span>yaratamiz?</span></h1>
       <p>Savol bering, rasm chizdiring, hujjat tahlil qiling — hammasi bir joyda.</p>
       <div class="ask">
@@ -258,7 +258,7 @@ h2 small{font-family:Inter,system-ui,sans-serif;font-size:12px;color:var(--muted
   <!-- CHAT -->
   <section class="screen" id="chat">
     <div class="chat-head">
-      <div class="av">🤖</div>
+      <div class="av" style="background:none;overflow:hidden;border-radius:50%"><img src="/app/mascot.png" alt="" style="width:100%"></div>
       <div><b id="chatTitle">Yordamchi</b><small>● onlayn</small></div>
       <button class="clr" onclick="clearChat()">Tozalash</button>
     </div>
@@ -428,7 +428,7 @@ function render(){
   const box=document.getElementById("msgs"); box.innerHTML="";
   if(!state.msgs.length){
     const m=MODES.find(x=>x.id===state.mode);
-    box.innerHTML=`<div class="empty"><div class="big">${m.ic}</div><b>${m.name}</b><p>${m.d}. Quyidagilardan birini sinab ko'ring:</p><div class="sugs">${m.s.map(s=>`<button>${esc(s)}</button>`).join("")}</div></div>`;
+    box.innerHTML=`<div class="empty"><div class="big"><img src="/app/mascot.png" alt="" style="width:96px;border-radius:50%"></div><b>${m.name}</b><p>${m.d}. Quyidagilardan birini sinab ko'ring:</p><div class="sugs">${m.s.map(s=>`<button>${esc(s)}</button>`).join("")}</div></div>`;
     box.querySelectorAll(".sugs button").forEach(b=>b.onclick=()=>{ document.getElementById("input").value=b.textContent; send(); });
     return;
   }
