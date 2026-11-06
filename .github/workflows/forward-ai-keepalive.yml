@@ -1,0 +1,13 @@
+# Forward Ai botini kunduzi uyg'oq tutadi (Render bepul tarifida 15 daqiqadan keyin uxlaydi).
+# Toshkent vaqti 08:00–23:59, har 10 daqiqada. Kechasi uxlaydi — Render'ning 750 soatlik bepul limiti tejaladi.
+name: Forward Ai keep-alive
+on:
+  schedule:
+    - cron: "*/10 3-18 * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: curl -fsS -m 90 https://forward-ai-bot.onrender.com/ || true
