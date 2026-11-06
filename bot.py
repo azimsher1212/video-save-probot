@@ -575,6 +575,12 @@ async def on_startup(*_, **__):
         types_cmd("img", "Rasm yaratish"), types_cmd("new", "Suhbatni tozalash"),
         types_cmd("premium", "Premium olish"), types_cmd("profile", "Profil"),
     ])
+    try:
+        await bot.set_my_name(name=os.getenv("BOT_NAME", "FORWARD AI Assistant"))
+        await bot.set_my_short_description(short_description="FORWARD® aqlli yordamchisi: chat, rasm, ovoz, hujjat, video, internet qidiruv.")
+        await bot.set_my_description(description="🤖 FORWARD AI Assistant\n\nSavol bering, rasm chizdiring, ovozli xabar, PDF/Word/Excel, video va YouTube havolasini yuboring — hammasini tushunaman.\n\nAdmin: " + ADMIN_CONTACT)
+    except Exception as e:
+        log.warning("set name: %s", e)
     if BASE_URL:
         await bot.set_webhook(f"{BASE_URL}/webhook", secret_token=WEBHOOK_SECRET,
                               drop_pending_updates=False, allowed_updates=dp.resolve_used_update_types())
