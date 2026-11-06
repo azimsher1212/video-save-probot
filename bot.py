@@ -5,6 +5,8 @@ ovozli xabar, ovozda javob, hujjat (PDF/DOCX/XLSX/TXT), video, YouTube xulosasi,
 guruh moderatsiyasi, kunlik limit, Telegram Stars premium, admin buyruqlari.
 """
 import asyncio
+import base64
+import pathlib
 import io
 import logging
 import os
@@ -20,6 +22,8 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, LabeledPrice, Message,
                            PreCheckoutQuery, ReplyKeyboardMarkup)
+from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram.utils.web_app import safe_parse_webapp_init_data
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from google import genai
@@ -104,7 +108,8 @@ async def rpc(fn: str, **params):
 
 
 async def get_user(m_user) -> dict:
-    u = await rpc("fai_touch", p_id=m_user.id, p_username=m_user.username or "", p_name=m_user.full_name)
+    name = getattr(m_user, "full_name", None) or " ".join(filter(None, [m_user.first_name, getattr(m_user, "last_name", None)]))
+    u = await rpc("fai_touch", p_id=m_user.id, p_username=m_user.username or "", p_name=name)
     if u is None:
         u = local_users.setdefault(m_user.id, {"id": m_user.id, "mode": "assistant", "banned": False,
                                                "used_today": 0, "premium": False, "premium_until": None})
@@ -179,14 +184,17 @@ async def check_access(m: Message) -> dict | None:
     return u
 
 
-async def ask_ai(chat_id: int, parts: list, mode: str = "assistant") -> str:
+async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list | None = None) -> str:
     parts = [types.Part.from_text(text=p) if isinstance(p, str) else p for p in parts]
-    contents = list(history[chat_id]) + [types.Content(role="user", parts=parts)]
+    base = hist if hist is not None else list(history[chat_id])
+    contents = base + [types.Content(role="user", parts=parts)]
     config = types.GenerateContentConfig(system_instruction=BASE_PROMPT + " " + MODES.get(mode, MODES["assistant"])[1])
     if mode == "search":
         config.tools = [types.Tool(google_search=types.GoogleSearch())]
     resp = await ai.aio.models.generate_content(model=CHAT_MODEL, contents=contents, config=config)
     answer = (resp.text or "Javob topilmadi.").strip()
+    if hist is not None:
+        return answer
     user_text = " ".join(p.text for p in parts if p.text) or "[media]"
     history[chat_id].append(types.Content(role="user", parts=[types.Part.from_text(text=user_text[:3000])]))
     history[chat_id].append(types.Content(role="model", parts=[types.Part.from_text(text=answer[:3000])]))
@@ -210,8 +218,7 @@ async def run_ai(m: Message, parts: list, mode: str):
 
 
 # ---------- Rasm yaratish (Pollinations — bepul) ----------
-async def generate_image(m: Message, prompt: str):
-    await bot.send_chat_action(m.chat.id, "upload_photo")
+async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) -> str:
     try:
         tr = await ai.aio.models.generate_content(
             model=CHAT_MODEL,
@@ -219,7 +226,16 @@ async def generate_image(m: Message, prompt: str):
         en = (tr.text or prompt).strip()
     except Exception:
         en = prompt
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(en) + "?width=1024&height=1024&nologo=true&model=flux"
+    if style:
+        en += ", " + style
+    seed = int.from_bytes(os.urandom(3), "big")
+    return (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(en[:900])}"
+            f"?width={w}&height={h}&nologo=true&model=flux&seed={seed}")
+
+
+async def generate_image(m: Message, prompt: str):
+    await bot.send_chat_action(m.chat.id, "upload_photo")
+    url = await image_url(prompt)
     try:
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=120)) as r:
             if r.status != 200:
@@ -284,6 +300,10 @@ async def start(m: Message):
     await get_user(m.from_user)
     await m.answer(f"Salom, {m.from_user.first_name}! Men FORWARD AI 🤖\n\n" + HELP_TEXT,
                    reply_markup=None if is_group(m) else MENU)
+    if BASE_URL and not is_group(m):
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🚀 Ilovani ochish", web_app=WebAppInfo(url=f"{BASE_URL}/app"))]])
+        await m.answer("📱 Forward Ai ilovasi — chat, rasm studiyasi va profil bir joyda:", reply_markup=kb)
 
 
 @dp.message(Command("help"))
@@ -430,24 +450,29 @@ async def tts(c: CallbackQuery):
     await c.answer("🔊 Tayyorlanmoqda...")
     await bot.send_chat_action(c.message.chat.id, "record_voice")
     try:
-        resp = await ai.aio.models.generate_content(
-            model=TTS_MODEL,
-            contents=text[:2500],
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore")))))
-        pcm = resp.candidates[0].content.parts[0].inline_data.data
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(24000)
-            w.writeframes(pcm)
-        await c.message.answer_audio(BufferedInputFile(buf.getvalue(), "forward-ai.wav"), title="FORWARD AI")
+        wav = await tts_wav(text)
+        await c.message.answer_audio(BufferedInputFile(wav, "forward-ai.wav"), title="FORWARD AI")
     except Exception as e:
         log.warning("tts: %s", e)
         await c.message.answer("Ovozli javobni hozir tayyorlab bo'lmadi.")
+
+
+async def tts_wav(text: str) -> bytes:
+    resp = await ai.aio.models.generate_content(
+        model=TTS_MODEL,
+        contents=text[:2500],
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore")))))
+    pcm = resp.candidates[0].content.parts[0].inline_data.data
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(pcm)
+    return buf.getvalue()
 
 
 # ---------- Rasm ----------
@@ -566,6 +591,120 @@ async def text_msg(m: Message):
     await run_ai(m, [m.text], mode)
 
 
+
+# ---------- Mini App (Telegram ichidagi ilova) API ----------
+WEBAPP_HTML = pathlib.Path(__file__).with_name("webapp") / "index.html"
+
+
+async def webapp_page(request):
+    return web.FileResponse(WEBAPP_HTML, headers={"Cache-Control": "no-cache"})
+
+
+async def api_auth(request):
+    try:
+        body = await request.json()
+        data = safe_parse_webapp_init_data(BOT_TOKEN, body.get("initData", ""))
+        return body, data.user
+    except Exception:
+        raise web.HTTPUnauthorized(text='{"error":"Ilovani Telegram ichida oching"}', content_type="application/json")
+
+
+def jerr(msg, status=400):
+    return web.json_response({"error": msg}, status=status)
+
+
+async def api_quota(wu):
+    u = await get_user(wu)
+    if u.get("banned"):
+        return u, "Siz bloklangansiz"
+    if not u.get("premium") and not is_admin_user(wu) and u.get("used_today", 0) >= FREE_LIMIT:
+        return u, f"Bugungi bepul limit ({FREE_LIMIT}) tugadi. ⭐ Premium oling yoki ertaga davom eting."
+    return u, None
+
+
+async def api_me(request):
+    _, wu = await api_auth(request)
+    u = await get_user(wu)
+    return web.json_response({"used": u.get("used_today", 0), "limit": FREE_LIMIT, "premium": bool(u.get("premium")),
+                              "premium_until": u.get("premium_until"), "premium_stars": PREMIUM_STARS})
+
+
+async def api_chat(request):
+    body, wu = await api_auth(request)
+    u, err = await api_quota(wu)
+    if err:
+        return jerr(err, 429)
+    mode = body.get("mode") if body.get("mode") in MODES else "assistant"
+    text = (body.get("text") or "").strip()[:8000]
+    hist = []
+    for h in (body.get("history") or [])[-11:]:
+        role = "model" if h.get("role") == "model" else "user"
+        hist.append(types.Content(role=role, parts=[types.Part.from_text(text=str(h.get("text", ""))[:3000])]))
+    while hist and hist[0].role != "user":
+        hist.pop(0)
+    parts = [text or "Tahlil qil"]
+    f = body.get("file")
+    if f and f.get("data"):
+        data = base64.b64decode(f["data"])
+        mime, name = f.get("mime", ""), f.get("name", "file")
+        if mime.startswith("image/") or mime == "application/pdf":
+            parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+        else:
+            try:
+                t = extract_text(name, data)
+            except Exception:
+                t = None
+            if t is None:
+                return jerr("Bu fayl turini o'qiy olmayman")
+            parts.append(f"Fayl: {name}\n\n{t[:200_000]}")
+    yt = YT_RE.search(text)
+    if yt:
+        parts.append(types.Part(file_data=types.FileData(file_uri=yt.group(0))))
+    try:
+        answer = await ask_ai(wu.id, parts, mode, hist=hist)
+    except Exception as e:
+        log.exception(e)
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            return jerr("Hozir so'rovlar ko'p, 1 daqiqadan keyin urinib ko'ring", 503)
+        return jerr("Xatolik yuz berdi, qayta urinib ko'ring", 500)
+    await use_quota(wu.id)
+    return web.json_response({"answer": answer})
+
+
+async def api_image(request):
+    body, wu = await api_auth(request)
+    u, err = await api_quota(wu)
+    if err:
+        return jerr(err, 429)
+    prompt = (body.get("prompt") or "").strip()[:1000]
+    if not prompt:
+        return jerr("Rasmni tasvirlab yozing")
+    w = max(256, min(int(body.get("width", 1024)), 1536))
+    h = max(256, min(int(body.get("height", 1024)), 1536))
+    url = await image_url(prompt, str(body.get("style", ""))[:200], w, h)
+    await use_quota(wu.id)
+    return web.json_response({"url": url})
+
+
+async def api_tts(request):
+    body, wu = await api_auth(request)
+    try:
+        wav = await tts_wav((body.get("text") or "")[:2500])
+        return web.Response(body=wav, content_type="audio/wav")
+    except Exception as e:
+        log.warning("tts api: %s", e)
+        return jerr("Ovoz tayyorlanmadi", 500)
+
+
+async def api_invoice(request):
+    _, wu = await api_auth(request)
+    link = await bot.create_invoice_link(
+        title="FORWARD AI Premium",
+        description=f"{PREMIUM_DAYS} kun cheksiz foydalanish",
+        payload=f"premium_{PREMIUM_DAYS}", currency="XTR",
+        prices=[LabeledPrice(label="Premium", amount=PREMIUM_STARS)], provider_token="")
+    return web.json_response({"link": link})
+
 # ---------- Ishga tushirish ----------
 async def on_startup(*_, **__):
     global http
@@ -582,6 +721,10 @@ async def on_startup(*_, **__):
     except Exception as e:
         log.warning("set name: %s", e)
     if BASE_URL:
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Open", web_app=WebAppInfo(url=f"{BASE_URL}/app")))
+        except Exception as e:
+            log.warning("menu button: %s", e)
         await bot.set_webhook(f"{BASE_URL}/webhook", secret_token=WEBHOOK_SECRET,
                               drop_pending_updates=False, allowed_updates=dp.resolve_used_update_types())
 
@@ -600,8 +743,11 @@ def main():
     if BASE_URL:  # Render: webhook rejimi (bepul tarifda uxlab qolsa ham Telegram uyg'otadi)
         dp.startup.register(on_startup)
         dp.shutdown.register(on_shutdown)
-        app = web.Application()
+        app = web.Application(client_max_size=25 * 1024 * 1024)
         app.router.add_get("/", lambda r: web.Response(text="FORWARD AI ishlayapti"))
+        app.router.add_get("/app", webapp_page)
+        for path, fn in (("me", api_me), ("chat", api_chat), ("image", api_image), ("tts", api_tts), ("invoice", api_invoice)):
+            app.router.add_post(f"/api/{path}", fn)
         SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
         setup_application(app, dp, bot=bot)
         web.run_app(app, host="0.0.0.0", port=PORT)
