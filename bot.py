@@ -324,7 +324,20 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
     )
     if mode == "search":
         config.tools = [types.Tool(google_search=types.GoogleSearch())]
-    resp = await gemini(contents, config, timeout=150 if heavy else 75)
+    try:
+        resp = await gemini(contents, config, timeout=150 if heavy else 75)
+    except Exception as e:
+        if mode != "search" or not _retryable(e) and "429" not in str(e):
+            raise
+        # Google qidiruv limiti tugasa — DuckDuckGo natijalari bilan javob beramiz
+        query = " ".join(p.text for p in parts if p.text)[:300]
+        found = await web_search(query)
+        config.tools = None
+        extra = (f"Quyida internetdan topilgan natijalar ({time.strftime('%Y-%m-%d')}). Shularga tayanib javob ber, "
+                 f"oxirida 1-3 manba havolasini yoz:\n\n{found}") if found else \
+            "Internetga ulanib bo'lmadi. Bilganingcha javob ber va ma'lumot eskirgan bo'lishi mumkinligini ayt."
+        contents[-1] = types.Content(role="user", parts=parts + [types.Part.from_text(text=extra)])
+        resp = await gemini(contents, config, timeout=75)
     answer = resp_text(resp)
     if hist is not None:
         return answer
@@ -333,6 +346,25 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
     history[chat_id].append(types.Content(role="model", parts=[types.Part.from_text(text=answer[:3000])]))
     last_answer[chat_id] = answer
     return answer
+
+
+async def web_search(query: str, n: int = 6) -> str:
+    """DuckDuckGo (bepul, kalitsiz) natijalari: sarlavha, qisqa matn, havola."""
+    try:
+        async with http.post("https://lite.duckduckgo.com/lite/", data={"q": query, "kl": "wt-wt"},
+                             headers={"User-Agent": "Mozilla/5.0 (ForwardAi bot)"},
+                             timeout=aiohttp.ClientTimeout(total=15)) as r:
+            page = await r.text()
+        links = re.findall(r"<a[^>]+href=\"(https?://[^\"]+)\"[^>]*class=['\"]result-link['\"][^>]*>(.*?)</a>", page, re.S)
+        snips = re.findall(r"class=['\"]result-snippet['\"][^>]*>(.*?)</td>", page, re.S)
+        out = []
+        for i, (u, t) in enumerate(links[:n]):
+            clean = lambda x: html.unescape(re.sub(r"<[^>]+>", "", x)).strip()  # noqa: E731
+            out.append(f"{i + 1}. {clean(t)} — {clean(snips[i]) if i < len(snips) else ''} ({u})")
+        return "\n".join(out)
+    except Exception as e:
+        log.warning("web_search: %s", e)
+        return ""
 
 
 def friendly_error(e: Exception) -> str:
@@ -369,15 +401,46 @@ async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) 
     if style:
         en += ", " + style
     seed = int.from_bytes(os.urandom(3), "big")
-    return (f"https://image.pollinations.ai/prompt/{urllib.parse.quote(en[:900])}"
-            f"?width={w}&height={h}&nologo=true&model=flux&seed={seed}")
+    return IMG_PROVIDERS[IMG_PROVIDER].format(p=urllib.parse.quote(en[:900]), w=w, h=h, seed=seed)
+
+
+# Bepul rasm manbalari — qaysi biri ishlasa, o'shani ishlatamiz
+IMG_PROVIDERS = [
+    "https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&nologo=true&seed={seed}",
+    "https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&nologo=true&model=turbo&seed={seed}",
+    "https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&nologo=true&model=flux&seed={seed}",
+    "https://gen.pollinations.ai/image/{p}?width={w}&height={h}&nologo=true&seed={seed}",
+]
+IMG_PROVIDER = 0
+
+
+async def pick_image_provider():
+    global IMG_PROVIDER
+    for i, tpl in enumerate(IMG_PROVIDERS):
+        url = tpl.format(p=urllib.parse.quote("red apple on a wooden table"), w=512, h=512, seed=42)
+        try:
+            async with http.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                ok = r.status == 200 and r.headers.get("content-type", "").startswith("image/")
+                log.info("image provider %s: %s %s", i, r.status, r.headers.get("content-type"))
+                if ok:
+                    IMG_PROVIDER = i
+                    return
+        except Exception as e:
+            log.info("image provider %s: %s", i, e)
 
 
 async def fetch_image(url: str) -> bytes:
     last = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
-            u = url if attempt == 0 else re.sub(r"seed=\d+", f"seed={int.from_bytes(os.urandom(3), 'big')}", url)
+            if attempt == 0:
+                u = url
+            else:  # boshqa manba bilan qayta urinish
+                q = re.search(r"/(?:prompt|image)/([^?]+)", url)
+                wh = re.search(r"width=(\d+)&height=(\d+)", url)
+                tpl = IMG_PROVIDERS[(IMG_PROVIDER + attempt) % len(IMG_PROVIDERS)]
+                u = tpl.format(p=q.group(1) if q else "art", w=wh.group(1) if wh else 1024,
+                               h=wh.group(2) if wh else 1024, seed=int.from_bytes(os.urandom(3), "big"))
             async with http.get(u, timeout=aiohttp.ClientTimeout(total=90)) as r:
                 if r.status == 200 and r.headers.get("content-type", "").startswith("image/"):
                     return await r.read()
@@ -758,11 +821,41 @@ async def tts(c: CallbackQuery):
     await c.answer("🔊 Tayyorlanmoqda...")
     await bot.send_chat_action(c.message.chat.id, "record_voice")
     try:
-        wav = await tts_wav(text)
-        await c.message.answer_audio(BufferedInputFile(wav, "forward-ai.wav"), title="FORWARD AI")
+        audio, _mime, ext = await tts_audio(text)
+        await c.message.answer_audio(BufferedInputFile(audio, f"forward-ai.{ext}"), title="Forward Ai", performer="FORWARD")
     except Exception as e:
         log.warning("tts: %s", e)
         await c.message.answer("Ovozli javobni hozir tayyorlab bo'lmadi.")
+
+
+def pick_voice(text: str) -> str:
+    if len(re.findall(r"[А-Яа-яЁё]", text)) > len(text) * 0.3:
+        return "ru-RU-SvetlanaNeural"
+    low = f" {text.lower()} "
+    uz = sum(low.count(w) for w in ("o'", "g'", "oʻ", "gʻ", " va ", " bu ", " uchun ", " bilan ", "sh", "ch", "lar", "ning"))
+    en = sum(low.count(w) for w in (" the ", " and ", " is ", " you ", " to ", " of "))
+    return "uz-UZ-MadinaNeural" if uz >= en else "en-US-AvaMultilingualNeural"
+
+
+async def tts_audio(text: str) -> tuple[bytes, str, str]:
+    """(audio, mime, fayl kengaytmasi). Avval Edge TTS, bo'lmasa Gemini TTS."""
+    text = re.sub(r"[*#`_>|]", "", text)
+    text = re.sub(r"https?://\S+", "", text).strip()[:2500] or "..."
+    try:
+        import edge_tts
+        com = edge_tts.Communicate(text, pick_voice(text), rate="+5%")
+        data = bytearray()
+
+        async def run():
+            async for ch in com.stream():
+                if ch.get("type") == "audio":
+                    data.extend(ch["data"])
+        await asyncio.wait_for(run(), 60)
+        if len(data) > 1000:
+            return bytes(data), "audio/mpeg", "mp3"
+    except Exception as e:
+        log.warning("edge tts: %s", e)
+    return await tts_wav(text), "audio/wav", "wav"
 
 
 async def tts_wav(text: str) -> bytes:
@@ -1000,8 +1093,8 @@ async def api_image(request):
 async def api_tts(request):
     body, wu = await api_auth(request)
     try:
-        wav = await tts_wav((body.get("text") or "")[:2500])
-        return web.Response(body=wav, content_type="audio/wav")
+        audio, mime, _ext = await tts_audio((body.get("text") or "")[:2500])
+        return web.Response(body=audio, content_type=mime)
     except Exception as e:
         log.warning("tts api: %s", e)
         return jerr("Ovoz tayyorlanmadi", 500)
@@ -1062,7 +1155,8 @@ async def run_selftest(which: str | None = None) -> dict:
         return resp_text(await gemini("Say OK", model=FAST_MODEL, timeout=20))
 
     async def tts_():
-        return f"{len(await tts_wav('Salom! Men Forward Ai.'))} bayt wav"
+        a, mime, _ = await tts_audio("Salom! Men Forward Ai, sizning aqlli yordamchingizman.")
+        return f"{len(a)} bayt {mime}"
 
     async def image():
         return f"{len(await fetch_image(await image_url('qizil olma')))} bayt rasm"
@@ -1070,13 +1164,19 @@ async def run_selftest(which: str | None = None) -> dict:
     async def db():
         return await rpc("fai_stats")
 
+    async def ddg():
+        r = await web_search("dollar kursi O'zbekiston bugun")
+        if not r:
+            raise RuntimeError("natija yo'q")
+        return r[:150]
+
     async def tg():
         me = await bot.get_me()
         wh = await bot.get_webhook_info()
         return f"@{me.username} webhook={wh.url} pending={wh.pending_update_count} err={wh.last_error_message}"
 
     checks = {"telegram": tg, "database": db, "chat": chat, "search": search, "fast_model": lite,
-              "tts": tts_, "image": image}
+              "tts": tts_, "image": image, "duckduckgo": ddg}
     await asyncio.gather(*(check(k, f()) for k, f in checks.items() if not which or k in which.split(",")))
     for f in ("welcome.mp4", "tour1.jpg", "tour2.jpg", "tour3.jpg", "tour4.jpg"):
         res[f"asset_{f}"] = {"ok": (ASSETS / f).exists()}
@@ -1148,7 +1248,7 @@ async def on_startup(*_, **__):
     except Exception as e:
         log.warning("set name: %s", e)
     async def boot():
-        await pick_models()
+        await asyncio.gather(pick_models(), pick_image_provider())
         if os.getenv("SELFTEST_ON_START") == "1":
             await selftest_on_start()
     asyncio.create_task(boot())

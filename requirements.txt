@@ -3,3 +3,4 @@ google-genai>=1.0
 aiohttp
 python-docx
 openpyxl
+edge-tts>=7
