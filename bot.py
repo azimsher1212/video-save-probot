@@ -39,9 +39,13 @@ log = logging.getLogger("forward-ai")
 # ---------- Sozlamalar ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.5-flash")
-TTS_MODEL = os.getenv("TTS_MODEL", "gemini-2.5-flash-preview-tts")
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-2.5-flash-lite")  # tarjima, moderatsiya va zaxira uchun
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-3.8-flash")
+TTS_MODEL = os.getenv("TTS_MODEL", "gemini-3.8-flash-lite-tts")
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3.5-flash-lite")  # tarjima, moderatsiya va zaxira uchun
+# Ishga tushganda qaysi model ishlashini tekshirib, birinchi ishlaganini tanlaymiz
+CHAT_CANDIDATES = [CHAT_MODEL, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3-flash-preview"]
+FAST_CANDIDATES = [FAST_MODEL, "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
+TTS_CANDIDATES = [TTS_MODEL, "gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview"]
 SELFTEST_KEY = os.getenv("SELFTEST_KEY", "")
 ASSETS = pathlib.Path(__file__).with_name("assets")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -256,6 +260,13 @@ async def check_access(m: Message) -> dict | None:
     return u
 
 
+def thinking(level: str):
+    return types.ThinkingConfig(thinking_level=level) if THINKING_OK else None
+
+
+THINKING_OK = True
+
+
 def _retryable(e: Exception) -> bool:
     s = str(e)
     return isinstance(e, asyncio.TimeoutError) or any(k in s for k in (
@@ -276,6 +287,8 @@ async def gemini(contents, config=None, model: str | None = None, timeout: float
             except Exception as e:
                 last = e
                 log.warning("gemini %s (%s): %s", mdl, attempt, str(e)[:200])
+                if "NOT_FOUND" in str(e) or "404" in str(e):
+                    break  # bu model yo'q — keyingisiga o'tamiz
                 if not _retryable(e):
                     raise
                 await asyncio.sleep(1.2)
@@ -306,7 +319,7 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
     heavy = any(getattr(p, "inline_data", None) or getattr(p, "file_data", None) for p in parts)
     config = types.GenerateContentConfig(
         system_instruction=BASE_PROMPT + " " + MODES.get(mode, MODES["assistant"])[1],
-        thinking_config=types.ThinkingConfig(thinking_budget=1024 if mode == "coder" else 0),
+        thinking_config=thinking("medium" if mode == "coder" else "low"),
         max_output_tokens=4096,
     )
     if mode == "search":
@@ -349,8 +362,7 @@ async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) 
     try:
         tr = await gemini(
             f"Translate this image description to a detailed English image prompt (max 60 words). Output only the prompt:\n{prompt}",
-            types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
-            model=FAST_MODEL, timeout=20)
+            None, model=FAST_MODEL, timeout=20)
         en = (tr.text or prompt).strip()
     except Exception:
         en = prompt
@@ -763,6 +775,8 @@ async def tts_wav(text: str) -> bytes:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore"))))), 90)
     pcm = resp.candidates[0].content.parts[0].inline_data.data
+    if pcm[:4] == b"RIFF":  # Gemini 3.8 TTS tayyor WAV qaytaradi
+        return pcm
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
@@ -1069,8 +1083,40 @@ async def run_selftest(which: str | None = None) -> dict:
     return res
 
 
+async def pick_models():
+    """Har bir vazifa uchun ishlaydigan birinchi modelni topadi (Google model nomlarini o'zgartirsa ham bot to'xtamaydi)."""
+    global CHAT_MODEL, FAST_MODEL, TTS_MODEL, THINKING_OK
+
+    async def works(mdl, cfg=None, contents="Say OK"):
+        try:
+            await asyncio.wait_for(ai.aio.models.generate_content(model=mdl, contents=contents, config=cfg), 30)
+            return True
+        except Exception as e:
+            log.info("model %s ishlamadi: %s", mdl, str(e)[:160])
+            return False
+
+    for mdl in dict.fromkeys(CHAT_CANDIDATES):
+        if await works(mdl, types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_level="low"))):
+            CHAT_MODEL = mdl
+            break
+        if await works(mdl):
+            CHAT_MODEL, THINKING_OK = mdl, False
+            break
+    for mdl in dict.fromkeys(FAST_CANDIDATES):
+        if await works(mdl):
+            FAST_MODEL = mdl
+            break
+    tcfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=types.SpeechConfig(
+        voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore"))))
+    for mdl in dict.fromkeys(TTS_CANDIDATES):
+        if await works(mdl, tcfg, "Salom"):
+            TTS_MODEL = mdl
+            break
+    log.info("MODELS chat=%s fast=%s tts=%s thinking=%s", CHAT_MODEL, FAST_MODEL, TTS_MODEL, THINKING_OK)
+
+
 async def selftest_on_start():
-    await asyncio.sleep(5)
+    await asyncio.sleep(1)
     try:
         r = await run_selftest()
         for k, v in r.items():
@@ -1089,13 +1135,23 @@ async def on_startup(*_, **__):
         types_cmd("premium", "Premium olish"), types_cmd("profile", "Profil"),
     ])
     try:
-        await bot.set_my_name(name=os.getenv("BOT_NAME", "FORWARD AI Assistant"))
-        await bot.set_my_short_description(short_description="FORWARD® aqlli yordamchisi: chat, rasm, ovoz, hujjat, video, internet qidiruv.")
-        await bot.set_my_description(description="🤖 FORWARD AI Assistant\n\nSavol bering, rasm chizdiring, ovozli xabar, PDF/Word/Excel, video va YouTube havolasini yuboring — hammasini tushunaman.\n\nAdmin: " + ADMIN_CONTACT)
+        want = os.getenv("BOT_NAME", "Forward Ai")
+        if (await bot.get_my_name()).name != want:
+            await bot.set_my_name(name=want)
+        sd = "FORWARD® aqlli yordamchisi: chat, rasm, ovoz, hujjat, tarjima, internet qidiruv."
+        if (await bot.get_my_short_description()).short_description != sd:
+            await bot.set_my_short_description(short_description=sd)
+        desc = ("🤖 Forward Ai — FORWARD® aqlli yordamchisi\n\nSavol bering, rasm chizdiring, ovozli xabar, "
+                "PDF/Word/Excel, video va YouTube havolasini yuboring — hammasini tushunaman.\n\nAdmin: " + ADMIN_CONTACT)
+        if (await bot.get_my_description()).description != desc:
+            await bot.set_my_description(description=desc)
     except Exception as e:
         log.warning("set name: %s", e)
-    if os.getenv("SELFTEST_ON_START") == "1":
-        asyncio.create_task(selftest_on_start())
+    async def boot():
+        await pick_models()
+        if os.getenv("SELFTEST_ON_START") == "1":
+            await selftest_on_start()
+    asyncio.create_task(boot())
     if BASE_URL:
         try:
             await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Open", web_app=WebAppInfo(url=f"{BASE_URL}/app")))
