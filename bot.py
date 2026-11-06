@@ -322,16 +322,22 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
         thinking_config=thinking("medium" if mode == "coder" else "low"),
         max_output_tokens=4096,
     )
-    if mode == "search":
+    global GROUNDING_BLOCK_UNTIL
+    use_grounding = mode == "search" and time.time() > GROUNDING_BLOCK_UNTIL
+    if use_grounding:
         config.tools = [types.Tool(google_search=types.GoogleSearch())]
     try:
+        if mode == "search" and not use_grounding:
+            raise RuntimeError("grounding o'chirilgan")
         resp = await gemini(contents, config, timeout=150 if heavy else 75)
     except Exception as e:
-        if mode != "search" or not _retryable(e) and "429" not in str(e):
+        if mode != "search":
             raise
-        # Google qidiruv limiti tugasa — DuckDuckGo natijalari bilan javob beramiz
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            GROUNDING_BLOCK_UNTIL = time.time() + 3600
+        # Google qidiruv ishlamasa — bepul jonli manbalar bilan javob beramiz
         query = " ".join(p.text for p in parts if p.text)[:300]
-        found = await web_search(query)
+        found = await live_context(query)
         config.tools = None
         extra = (f"Quyida internetdan topilgan natijalar ({time.strftime('%Y-%m-%d')}). Shularga tayanib javob ber, "
                  f"oxirida 1-3 manba havolasini yoz:\n\n{found}") if found else \
@@ -348,15 +354,97 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
     return answer
 
 
+UZ_CITIES = {"toshkent": "Tashkent", "samarqand": "Samarkand", "buxoro": "Bukhara", "andijon": "Andijan",
+             "farg'ona": "Fergana", "fargona": "Fergana", "namangan": "Namangan", "qarshi": "Karshi",
+             "nukus": "Nukus", "xiva": "Khiva", "urganch": "Urgench", "jizzax": "Jizzakh", "termiz": "Termez",
+             "navoiy": "Navoi", "guliston": "Gulistan", "qo'qon": "Kokand", "chirchiq": "Chirchiq",
+             "moskva": "Moscow", "dubay": "Dubai", "istanbul": "Istanbul", "seul": "Seoul", "pekin": "Beijing",
+             "guanchjou": "Guangzhou", "yiwu": "Yiwu", "urumchi": "Urumqi"}
+WMO = {0: "ochiq osmon", 1: "asosan ochiq", 2: "qisman bulutli", 3: "bulutli", 45: "tuman", 48: "tuman",
+       51: "mayda yomg'ir", 53: "mayda yomg'ir", 55: "mayda yomg'ir", 61: "yomg'ir", 63: "yomg'ir",
+       65: "kuchli yomg'ir", 71: "qor", 73: "qor", 75: "kuchli qor", 80: "jala", 81: "jala", 82: "kuchli jala",
+       95: "momaqaldiroq", 96: "do'l bilan momaqaldiroq", 99: "do'l bilan momaqaldiroq"}
+
+
+async def _get_json(url: str, timeout: float = 10):
+    async with http.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
+                        headers={"User-Agent": "ForwardAi/1.0 (+https://t.me/ForwardAi_assistent_Bot)"}) as r:
+        return await r.json(content_type=None)
+
+
+async def cbu_rates() -> str:
+    data = await _get_json("https://cbu.uz/uz/arkhiv-kursov-valyut/json/")
+    want = {"USD", "EUR", "RUB", "CNY", "KZT", "TRY", "GBP", "AED", "KRW"}
+    rows = [f"1 {d['Ccy']} = {d['Rate']} so'm ({'+' if not str(d.get('Diff', '')).startswith('-') else ''}{d.get('Diff')})"
+            for d in data if d.get("Ccy") in want]
+    return f"O'zbekiston Markaziy banki rasmiy kursi ({data[0].get('Date')}):\n" + "\n".join(rows) + " (manba: cbu.uz)"
+
+
+async def weather(query: str) -> str:
+    low = query.lower()
+    city = next((v for k, v in UZ_CITIES.items() if k in low), "Tashkent")
+    g = await _get_json(f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1")
+    p = g["results"][0]
+    w = await _get_json(
+        f"https://api.open-meteo.com/v1/forecast?latitude={p['latitude']}&longitude={p['longitude']}"
+        "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m"
+        "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=3")
+    c, d = w["current"], w["daily"]
+    lines = [f"{p['name']} ob-havosi (hozir, {c['time']}): {c['temperature_2m']}°C, his qilinishi {c['apparent_temperature']}°C, "
+             f"{WMO.get(c['weather_code'], '')}, shamol {c['wind_speed_10m']} km/soat, namlik {c['relative_humidity_2m']}%"]
+    for i in range(len(d["time"])):
+        lines.append(f"{d['time'][i]}: {d['temperature_2m_min'][i]}…{d['temperature_2m_max'][i]}°C, "
+                     f"{WMO.get(d['weather_code'][i], '')}, yog'ingarchilik ehtimoli {d['precipitation_probability_max'][i]}%")
+    return "\n".join(lines) + " (manba: open-meteo.com)"
+
+
+async def wiki(query: str) -> str:
+    out = []
+    for lang in ("uz", "en"):
+        try:
+            j = await _get_json(f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=2"
+                                f"&srsearch={urllib.parse.quote(query[:200])}")
+            for h in j.get("query", {}).get("search", []):
+                snip = html.unescape(re.sub(r"<[^>]+>", "", h.get("snippet", "")))
+                out.append(f"Vikipediya ({lang}): {h['title']} — {snip} "
+                           f"(https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(h['title'].replace(' ', '_'))})")
+        except Exception as e:
+            log.info("wiki %s: %s", lang, e)
+    return "\n".join(out)
+
+
+async def live_context(query: str) -> str:
+    """So'rovga mos jonli ma'lumotlar: valyuta kursi, ob-havo, Vikipediya, DuckDuckGo."""
+    low = query.lower()
+    jobs = []
+    if re.search(r"kurs|dollar|valyut|yevro|evro|euro|rubl|yuan|so'm|курс|доллар", low):
+        jobs.append(cbu_rates())
+    if re.search(r"ob-?havo|havo|harorat|yomg'ir|qor |weather|погод", low):
+        jobs.append(weather(query))
+    jobs += [web_search(query), wiki(query)]
+    res = await asyncio.gather(*jobs, return_exceptions=True)
+    parts = [r for r in res if isinstance(r, str) and r.strip()]
+    for r in res:
+        if isinstance(r, Exception):
+            log.info("live_context: %s", r)
+    return "\n\n".join(parts)
+
+
+GROUNDING_BLOCK_UNTIL = 0.0
+
+
 async def web_search(query: str, n: int = 6) -> str:
     """DuckDuckGo (bepul, kalitsiz) natijalari: sarlavha, qisqa matn, havola."""
     try:
-        async with http.post("https://lite.duckduckgo.com/lite/", data={"q": query, "kl": "wt-wt"},
-                             headers={"User-Agent": "Mozilla/5.0 (ForwardAi bot)"},
-                             timeout=aiohttp.ClientTimeout(total=15)) as r:
+        async with http.get("https://html.duckduckgo.com/html/", params={"q": query, "kl": "wt-wt"},
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                                   "(KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+                                     "Accept-Language": "uz,ru;q=0.8,en;q=0.6"},
+                            timeout=aiohttp.ClientTimeout(total=12)) as r:
             page = await r.text()
-        links = re.findall(r"<a[^>]+href=\"(https?://[^\"]+)\"[^>]*class=['\"]result-link['\"][^>]*>(.*?)</a>", page, re.S)
-        snips = re.findall(r"class=['\"]result-snippet['\"][^>]*>(.*?)</td>", page, re.S)
+        links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S)
+        links = [(urllib.parse.unquote(re.sub(r"^.*?uddg=([^&]+).*$", r"\1", u)), t) for u, t in links]
+        snips = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', page, re.S)
         out = []
         for i, (u, t) in enumerate(links[:n]):
             clean = lambda x: html.unescape(re.sub(r"<[^>]+>", "", x)).strip()  # noqa: E731
@@ -412,21 +500,29 @@ IMG_PROVIDERS = [
     "https://gen.pollinations.ai/image/{p}?width={w}&height={h}&nologo=true&seed={seed}",
 ]
 IMG_PROVIDER = 0
+IMG_OK = True
+POLLINATIONS_KEY = os.getenv("POLLINATIONS_KEY", "")
+
+
+def img_headers() -> dict:
+    return {"Authorization": f"Bearer {POLLINATIONS_KEY}"} if POLLINATIONS_KEY else {}
 
 
 async def pick_image_provider():
-    global IMG_PROVIDER
+    global IMG_PROVIDER, IMG_OK
     for i, tpl in enumerate(IMG_PROVIDERS):
         url = tpl.format(p=urllib.parse.quote("red apple on a wooden table"), w=512, h=512, seed=42)
         try:
-            async with http.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+            async with http.get(url, timeout=aiohttp.ClientTimeout(total=60), headers=img_headers()) as r:
                 ok = r.status == 200 and r.headers.get("content-type", "").startswith("image/")
-                log.info("image provider %s: %s %s", i, r.status, r.headers.get("content-type"))
+                body = "" if ok else (await r.text())[:200]
+                log.info("image provider %s: %s %s %s", i, r.status, r.headers.get("content-type"), body)
                 if ok:
-                    IMG_PROVIDER = i
+                    IMG_PROVIDER, IMG_OK = i, True
                     return
         except Exception as e:
             log.info("image provider %s: %s", i, e)
+    IMG_OK = False
 
 
 async def fetch_image(url: str) -> bytes:
@@ -441,7 +537,7 @@ async def fetch_image(url: str) -> bytes:
                 tpl = IMG_PROVIDERS[(IMG_PROVIDER + attempt) % len(IMG_PROVIDERS)]
                 u = tpl.format(p=q.group(1) if q else "art", w=wh.group(1) if wh else 1024,
                                h=wh.group(2) if wh else 1024, seed=int.from_bytes(os.urandom(3), "big"))
-            async with http.get(u, timeout=aiohttp.ClientTimeout(total=90)) as r:
+            async with http.get(u, timeout=aiohttp.ClientTimeout(total=90), headers=img_headers()) as r:
                 if r.status == 200 and r.headers.get("content-type", "").startswith("image/"):
                     return await r.read()
                 last = RuntimeError(f"status {r.status}")
@@ -458,7 +554,13 @@ def redraw_kb() -> InlineKeyboardMarkup:
 last_prompt: dict[int, str] = {}
 
 
+IMG_OFF_TEXT = ("🎨 Rasm chizish xizmati hozir texnik sozlanmoqda va tez orada ishga tushadi.\n"
+                "Bu vaqtda rasm yuborsangiz — tahlil qilib beraman, yoki rasm uchun batafsil prompt yozib beraman.")
+
+
 async def generate_image(m: Message, prompt: str, user_id: int | None = None):
+    if not IMG_OK:
+        return await m.answer(IMG_OFF_TEXT)
     note = await m.answer("🎨 Chizilmoqda... (10–30 soniya)")
     try:
         async with busy(m.chat.id, "upload_photo"):
@@ -1085,9 +1187,29 @@ async def api_image(request):
         return jerr("Rasmni tasvirlab yozing")
     w = max(256, min(int(body.get("width", 1024)), 1536))
     h = max(256, min(int(body.get("height", 1024)), 1536))
-    url = await image_url(prompt, str(body.get("style", ""))[:200], w, h)
+    if not IMG_OK:
+        return jerr("Rasm chizish xizmati tez orada ishga tushadi", 503)
+    try:
+        data = await fetch_image(await image_url(prompt, str(body.get("style", ""))[:200], w, h))
+    except Exception as e:
+        log.warning("api image: %s", e)
+        return jerr("Rasm xizmati band, 1 daqiqadan keyin urinib ko'ring", 503)
+    key = os.urandom(8).hex()
+    IMG_CACHE[key] = data
+    while len(IMG_CACHE) > 60:
+        IMG_CACHE.pop(next(iter(IMG_CACHE)))
     await use_quota(wu.id)
-    return web.json_response({"url": url})
+    return web.json_response({"url": f"/img/{key}.jpg"})
+
+
+IMG_CACHE: dict[str, bytes] = {}
+
+
+async def img_cached(request):
+    data = IMG_CACHE.get(request.match_info["key"])
+    if not data:
+        raise web.HTTPNotFound()
+    return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 async def api_tts(request):
@@ -1165,10 +1287,14 @@ async def run_selftest(which: str | None = None) -> dict:
         return await rpc("fai_stats")
 
     async def ddg():
-        r = await web_search("dollar kursi O'zbekiston bugun")
+        r = await web_search("Samarqand Registon")
         if not r:
             raise RuntimeError("natija yo'q")
         return r[:150]
+
+    async def live():
+        a, b, c = await asyncio.gather(cbu_rates(), weather("Toshkent ob-havo"), wiki("Samarqand"))
+        return f"{a[:80]} | {b[:80]} | {c[:60]}"
 
     async def tg():
         me = await bot.get_me()
@@ -1176,7 +1302,7 @@ async def run_selftest(which: str | None = None) -> dict:
         return f"@{me.username} webhook={wh.url} pending={wh.pending_update_count} err={wh.last_error_message}"
 
     checks = {"telegram": tg, "database": db, "chat": chat, "search": search, "fast_model": lite,
-              "tts": tts_, "image": image, "duckduckgo": ddg}
+              "tts": tts_, "image": image, "duckduckgo": ddg, "live": live}
     await asyncio.gather(*(check(k, f()) for k, f in checks.items() if not which or k in which.split(",")))
     for f in ("welcome.mp4", "tour1.jpg", "tour2.jpg", "tour3.jpg", "tour4.jpg"):
         res[f"asset_{f}"] = {"ok": (ASSETS / f).exists()}
@@ -1280,6 +1406,7 @@ def main():
         app.router.add_get("/app", webapp_page)
         app.router.add_get("/app/mark.png", lambda r: web.FileResponse(WEBAPP_HTML.with_name("mark.png")))
         app.router.add_get("/selftest", selftest)
+        app.router.add_get("/img/{key}.jpg", img_cached)
         for path, fn in (("me", api_me), ("chat", api_chat), ("image", api_image), ("tts", api_tts), ("invoice", api_invoice)):
             app.router.add_post(f"/api/{path}", fn)
         SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")

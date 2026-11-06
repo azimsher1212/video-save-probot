@@ -567,7 +567,8 @@ const INSPO = [
 ];
 function fillInsp(id){
   const box=document.getElementById(id);
-  box.innerHTML=INSPO.map(x=>`<button><img loading="lazy" src="${PIC(x[1],512,680,x[2])}" alt="" onerror="this.style.opacity=0"><span>${x[0]}</span></button>`).join("");
+  const EM=["🏛","🛠","🌙","🌆","🏎","🚀","🔷","🧿"], GR=["#268cdc,#0c4e96","#0c4e96,#f02828","#1b2a7a,#268cdc","#3a1d6e,#f02828","#f02828,#7a1030","#0c4e96,#3fd8ff","#268cdc,#f02828","#0c4e96,#d4a017"];
+  box.innerHTML=INSPO.map((x,i)=>`<button style="background:linear-gradient(160deg,${GR[i%8]})"><b style="position:absolute;inset:0;display:grid;place-items:center;font-size:54px">${EM[i%8]}</b><img loading="lazy" src="${PIC(x[1],512,680,x[2])}" alt="" style="position:relative" onerror="this.remove()"><span>${x[0]}</span></button>`).join("");
   box.querySelectorAll("button").forEach((b,i)=>b.onclick=()=>{ document.getElementById("imgPrompt").value=INSPO[i][0]; go("studio"); genImage(); });
 }
 fillInsp("inspHome"); fillInsp("inspStudio");
