@@ -5,6 +5,9 @@ ovozli xabar, ovozda javob, hujjat (PDF/DOCX/XLSX/TXT), video, YouTube xulosasi,
 guruh moderatsiyasi, kunlik limit, Telegram Stars premium, admin buyruqlari.
 """
 import asyncio
+import html
+import time
+from contextlib import asynccontextmanager
 import base64
 import pathlib
 import io
@@ -22,7 +25,8 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, LabeledPrice, Message,
                            PreCheckoutQuery, ReplyKeyboardMarkup)
-from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ErrorEvent, FSInputFile, InputMediaPhoto, MenuButtonWebApp, WebAppInfo
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
@@ -37,6 +41,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-2.5-flash")
 TTS_MODEL = os.getenv("TTS_MODEL", "gemini-2.5-flash-preview-tts")
+FAST_MODEL = os.getenv("FAST_MODEL", "gemini-2.5-flash-lite")  # tarjima, moderatsiya va zaxira uchun
+SELFTEST_KEY = os.getenv("SELFTEST_KEY", "")
+ASSETS = pathlib.Path(__file__).with_name("assets")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 DB_SECRET = os.getenv("DB_SECRET", "")
@@ -54,7 +61,8 @@ WEBHOOK_SECRET = re.sub(r"[^A-Za-z0-9]", "", BOT_TOKEN)[-32:]
 
 BASE_PROMPT = ("Sen FORWARD AI — FORWARD® brendining aqlli yordamchisisan. Foydalanuvchi qaysi tilda "
                "yozsa, o'sha tilda (asosan o'zbek lotin) javob ber. Javoblar aniq va foydali bo'lsin. "
-               "Telegram uchun oddiy matn yoz, markdown jadval ishlatma.")
+               "Telegram uchun yoz: **qalin** va ro'yxatlar mumkin, jadval va # sarlavha ishlatma. "
+               "Keraksiz uzun kirish so'zlarisiz, to'g'ridan-to'g'ri javob ber.")
 MODES = {
     "assistant": ("🤖 Yordamchi", "Har qanday savolga yordam ber."),
     "search": ("🔎 Internet", "Internetdan eng so'nggi ma'lumotni qidirib, manbalar bilan javob ber."),
@@ -154,11 +162,75 @@ async def download(file_id: str) -> bytes:
     return buf.getvalue()
 
 
+def md_to_html(t: str) -> str:
+    """Gemini markdown'ini Telegram HTML'ga aylantiradi."""
+    blocks = re.split(r"(```[\s\S]*?```)", t)
+    out = []
+    for b in blocks:
+        if b.startswith("```") and b.endswith("```") and len(b) >= 6:
+            code = re.sub(r"^```[\w+-]*\n?", "", b)[:-3]
+            out.append(f"<pre>{html.escape(code.strip())}</pre>")
+            continue
+        b = html.escape(b, quote=False)
+        b = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", b)
+        b = re.sub(r"\*\*([^*\n]+?)\*\*", r"<b>\1</b>", b)
+        b = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", b)
+        b = re.sub(r"(?m)^(\s*)[*\-]\s+", r"\1• ", b)
+        b = re.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"<i>\1</i>", b)
+        out.append(b)
+    return "".join(out)
+
+
+def split_text(text: str, n: int = 3500) -> list[str]:
+    parts, cur = [], ""
+    for para in text.split("\n"):
+        while len(para) > n:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(para[:n])
+            para = para[n:]
+        if cur and len(cur) + len(para) + 1 > n:
+            parts.append(cur)
+            cur = para
+        else:
+            cur = f"{cur}\n{para}" if cur else para
+    if cur:
+        parts.append(cur)
+    fixed, carry = [], False  # ``` bloklari bo'linib ketmasligi uchun
+    for p in parts:
+        if carry:
+            p = "```\n" + p
+        carry = p.count("```") % 2 == 1
+        fixed.append(p + ("\n```" if carry else ""))
+    return fixed or ["..."]
+
+
 async def send_long(m: Message, text: str, tts: bool = True):
-    chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or ["..."]
+    chunks = split_text(text)
     for i, c in enumerate(chunks):
-        last = i == len(chunks) - 1
-        await m.answer(c, reply_markup=TTS_KB if (tts and last and not is_group(m)) else None)
+        kb = TTS_KB if (tts and i == len(chunks) - 1 and not is_group(m)) else None
+        try:
+            await m.answer(md_to_html(c), parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+        except TelegramBadRequest:
+            await m.answer(c, reply_markup=kb, disable_web_page_preview=True)
+
+
+@asynccontextmanager
+async def busy(chat_id: int, action: str = "typing"):
+    """Javob tayyorlanguncha 'yozmoqda...' holatini ushlab turadi."""
+    async def loop():
+        while True:
+            try:
+                await bot.send_chat_action(chat_id, action)
+            except Exception:
+                pass
+            await asyncio.sleep(4.5)
+    task = asyncio.create_task(loop())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 async def check_access(m: Message) -> dict | None:
@@ -184,15 +256,63 @@ async def check_access(m: Message) -> dict | None:
     return u
 
 
+def _retryable(e: Exception) -> bool:
+    s = str(e)
+    return isinstance(e, asyncio.TimeoutError) or any(k in s for k in (
+        "429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded", "DEADLINE"))
+
+
+async def gemini(contents, config=None, model: str | None = None, timeout: float = 75):
+    """Gemini'ni chaqiradi: xato bo'lsa bir marta qayta, keyin tezkor zaxira model bilan urinadi."""
+    models = [model or CHAT_MODEL]
+    if FAST_MODEL not in models:
+        models.append(FAST_MODEL)
+    last = None
+    for i, mdl in enumerate(models):
+        for attempt in range(2 if i == 0 else 1):
+            try:
+                return await asyncio.wait_for(
+                    ai.aio.models.generate_content(model=mdl, contents=contents, config=config), timeout)
+            except Exception as e:
+                last = e
+                log.warning("gemini %s (%s): %s", mdl, attempt, str(e)[:200])
+                if not _retryable(e):
+                    raise
+                await asyncio.sleep(1.2)
+    raise last
+
+
+def resp_text(resp) -> str:
+    try:
+        t = resp.text
+    except Exception:
+        t = None
+    if t and t.strip():
+        return t.strip()
+    reason = ""
+    try:
+        reason = str(resp.candidates[0].finish_reason)
+    except Exception:
+        pass
+    if "SAFETY" in reason or "PROHIBITED" in reason:
+        return "Kechirasiz, bu so'rovga javob bera olmayman. Boshqacha so'rab ko'ring."
+    return "Javob olinmadi, savolni boshqacharoq yozib ko'ring."
+
+
 async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list | None = None) -> str:
     parts = [types.Part.from_text(text=p) if isinstance(p, str) else p for p in parts]
     base = hist if hist is not None else list(history[chat_id])
     contents = base + [types.Content(role="user", parts=parts)]
-    config = types.GenerateContentConfig(system_instruction=BASE_PROMPT + " " + MODES.get(mode, MODES["assistant"])[1])
+    heavy = any(getattr(p, "inline_data", None) or getattr(p, "file_data", None) for p in parts)
+    config = types.GenerateContentConfig(
+        system_instruction=BASE_PROMPT + " " + MODES.get(mode, MODES["assistant"])[1],
+        thinking_config=types.ThinkingConfig(thinking_budget=1024 if mode == "coder" else 0),
+        max_output_tokens=4096,
+    )
     if mode == "search":
         config.tools = [types.Tool(google_search=types.GoogleSearch())]
-    resp = await ai.aio.models.generate_content(model=CHAT_MODEL, contents=contents, config=config)
-    answer = (resp.text or "Javob topilmadi.").strip()
+    resp = await gemini(contents, config, timeout=150 if heavy else 75)
+    answer = resp_text(resp)
     if hist is not None:
         return answer
     user_text = " ".join(p.text for p in parts if p.text) or "[media]"
@@ -202,27 +322,35 @@ async def ask_ai(chat_id: int, parts: list, mode: str = "assistant", hist: list 
     return answer
 
 
+def friendly_error(e: Exception) -> str:
+    s = str(e)
+    if "429" in s or "RESOURCE_EXHAUSTED" in s:
+        return "⏳ Hozir so'rovlar juda ko'p. 1 daqiqadan keyin qayta yuboring."
+    if isinstance(e, asyncio.TimeoutError) or "DEADLINE" in s:
+        return "⌛ Javob juda uzoq tayyorlandi. Savolni qisqaroq qilib qayta yuboring."
+    if "INVALID_ARGUMENT" in s or "400" in s:
+        return "Bu faylni o'qib bo'lmadi. Boshqa formatda yoki kichikroq qilib yuboring."
+    return "⚠️ Kutilmagan xatolik. Qayta urinib ko'ring."
+
+
 async def run_ai(m: Message, parts: list, mode: str):
-    await bot.send_chat_action(m.chat.id, "typing")
     try:
-        answer = await ask_ai(m.chat.id, parts, mode)
+        async with busy(m.chat.id):
+            answer = await ask_ai(m.chat.id, parts, mode)
         await use_quota(m.from_user.id)
         await send_long(m, answer)
     except Exception as e:
         log.exception(e)
-        msg = str(e)
-        if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-            await m.answer("⏳ Hozir so'rovlar ko'p. 1 daqiqadan keyin qayta urinib ko'ring.")
-        else:
-            await m.answer("Xatolik yuz berdi, keyinroq urinib ko'ring.")
+        await m.answer(friendly_error(e))
 
 
 # ---------- Rasm yaratish (Pollinations — bepul) ----------
 async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) -> str:
     try:
-        tr = await ai.aio.models.generate_content(
-            model=CHAT_MODEL,
-            contents=f"Translate this image description to a detailed English image prompt. Output only the prompt:\n{prompt}")
+        tr = await gemini(
+            f"Translate this image description to a detailed English image prompt (max 60 words). Output only the prompt:\n{prompt}",
+            types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
+            model=FAST_MODEL, timeout=20)
         en = (tr.text or prompt).strip()
     except Exception:
         en = prompt
@@ -233,19 +361,46 @@ async def image_url(prompt: str, style: str = "", w: int = 1024, h: int = 1024) 
             f"?width={w}&height={h}&nologo=true&model=flux&seed={seed}")
 
 
-async def generate_image(m: Message, prompt: str):
-    await bot.send_chat_action(m.chat.id, "upload_photo")
-    url = await image_url(prompt)
+async def fetch_image(url: str) -> bytes:
+    last = None
+    for attempt in range(2):
+        try:
+            u = url if attempt == 0 else re.sub(r"seed=\d+", f"seed={int.from_bytes(os.urandom(3), 'big')}", url)
+            async with http.get(u, timeout=aiohttp.ClientTimeout(total=90)) as r:
+                if r.status == 200 and r.headers.get("content-type", "").startswith("image/"):
+                    return await r.read()
+                last = RuntimeError(f"status {r.status}")
+        except Exception as e:
+            last = e
+        await asyncio.sleep(1)
+    raise last
+
+
+def redraw_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Yana chizish", callback_data="redraw")]])
+
+
+last_prompt: dict[int, str] = {}
+
+
+async def generate_image(m: Message, prompt: str, user_id: int | None = None):
+    note = await m.answer("🎨 Chizilmoqda... (10–30 soniya)")
     try:
-        async with http.get(url, timeout=aiohttp.ClientTimeout(total=120)) as r:
-            if r.status != 200:
-                raise RuntimeError(f"status {r.status}")
-            data = await r.read()
-        await m.answer_photo(BufferedInputFile(data, "forward-ai.jpg"), caption=f"🎨 {prompt[:900]}")
-        await use_quota(m.from_user.id)
+        async with busy(m.chat.id, "upload_photo"):
+            url = await image_url(prompt)
+            data = await fetch_image(url)
+        last_prompt[m.chat.id] = prompt
+        await m.answer_photo(BufferedInputFile(data, "forward-ai.jpg"), caption=f"🎨 {prompt[:900]}",
+                             reply_markup=redraw_kb())
+        await use_quota(user_id or m.from_user.id)
     except Exception as e:
         log.warning("image gen: %s", e)
-        await m.answer("Rasm yaratib bo'lmadi, birozdan keyin qayta urinib ko'ring.")
+        await m.answer("Rasm xizmati hozir band. 1 daqiqadan keyin qayta urinib ko'ring.")
+    finally:
+        try:
+            await note.delete()
+        except Exception:
+            pass
 
 
 # ---------- Guruh moderatsiyasi ----------
@@ -259,8 +414,8 @@ async def violates(text: str) -> str | None:
         return "so'kinish"
     if AI_MODERATION:
         try:
-            r = await ai.aio.models.generate_content(
-                model=CHAT_MODEL,
+            r = await gemini(
+                model=FAST_MODEL, timeout=15,
                 contents=f"Bu xabarda so'kinish, haqorat yoki reklama bormi? Faqat HA yoki YOQ deb javob ber.\n\n{text}")
             if (r.text or "").strip().upper().startswith("HA"):
                 return "nomaqbul matn"
@@ -295,21 +450,162 @@ HELP_TEXT = (
 )
 
 
+file_ids: dict[str, str] = {}  # yuklangan rasm/animatsiyalar qayta yuklanmasligi uchun
+
+
+def media(name: str):
+    return file_ids.get(name) or FSInputFile(ASSETS / name)
+
+
+def remember(name: str, msg: Message):
+    if msg.animation:
+        file_ids[name] = msg.animation.file_id
+    elif msg.photo:
+        file_ids[name] = msg.photo[-1].file_id
+
+
+TOUR = [
+    ("tour1.jpg", "💬 <b>1/4 · Savol bering</b>\n\nIstalgan savolni yozing — o'zbek, rus yoki ingliz tilida. "
+                  "Pastdagi menyudan rejim tanlang: Biznes, Tarjimon, Kreativ, Dasturchi, O'qituvchi yoki Internet."),
+    ("tour2.jpg", "🎨 <b>2/4 · Rasm yarating</b>\n\n<code>/img qor ostidagi Samarqand</code> deb yozing yoki "
+                  "«🎨 Rasm yaratish» rejimini tanlang. Ilovadagi Studiyada 7 xil uslub bor."),
+    ("tour3.jpg", "🎙 <b>3/4 · Ovoz, rasm, hujjat</b>\n\nOvozli xabar, rasm, PDF/Word/Excel, video yoki YouTube "
+                  "havolasini yuboring — tushunib, tahlil qilib beraman. Javob ostidagi 🔊 — ovozda eshitish."),
+    ("tour4.jpg", f"🚀 <b>4/4 · Ilova va Premium</b>\n\n«Open» tugmasi — Telegram ichidagi ilova. "
+                  f"Kuniga {FREE_LIMIT} ta so'rov bepul, ⭐ Premium bilan cheksiz.\n\nTayyormisiz? Boshladik! 👇"),
+]
+SAMPLE_Q = ["Kafel do'koni uchun Instagram post yozib ber", "Bugungi dollar kursi qancha?",
+            "Menga ingliz tilini o'rganish rejasini tuz"]
+SAMPLE_IMG = ["Qor ostidagi Samarqand, kechki chiroqlar", "Zamonaviy kafel ko'rgazma zali", "Ko'k va qizil minimal logo"]
+
+
+def tour_kb(i: int) -> InlineKeyboardMarkup:
+    nav = []
+    if i > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Orqaga", callback_data=f"tour:{i - 1}"))
+    if i < len(TOUR) - 1:
+        nav.append(InlineKeyboardButton(text="Keyingi ▶️", callback_data=f"tour:{i + 1}"))
+    rows = [nav]
+    if i == len(TOUR) - 1:
+        rows.append([InlineKeyboardButton(text="✅ Boshladik!", callback_data="tour:done")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def welcome_kb() -> InlineKeyboardMarkup:
+    rows = []
+    if BASE_URL:
+        rows.append([InlineKeyboardButton(text="🚀 Ilovani ochish", web_app=WebAppInfo(url=f"{BASE_URL}/app"))])
+    rows.append([InlineKeyboardButton(text="📖 Tanishuv (30 soniya)", callback_data="tour:0")])
+    rows.append([InlineKeyboardButton(text="💬 Savol berib ko'rish", callback_data="try:chat"),
+                 InlineKeyboardButton(text="🎨 Rasm chizish", callback_data="try:img")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def over_limit(u: dict, tg_user) -> bool:
+    return not u.get("premium") and not is_admin_user(tg_user) and u.get("used_today", 0) >= FREE_LIMIT
+
+
 @dp.message(CommandStart())
 async def start(m: Message):
     await get_user(m.from_user)
-    await m.answer(f"Salom, {m.from_user.first_name}! Men FORWARD AI 🤖\n\n" + HELP_TEXT,
-                   reply_markup=None if is_group(m) else MENU)
-    if BASE_URL and not is_group(m):
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="🚀 Ilovani ochish", web_app=WebAppInfo(url=f"{BASE_URL}/app"))]])
-        await m.answer("📱 Forward Ai ilovasi — chat, rasm studiyasi va profil bir joyda:", reply_markup=kb)
+    if is_group(m):
+        return await m.answer("Salom! Men Forward Ai 🤖 Savol berish uchun meni @mention qiling yoki xabarimga reply qiling.\n"
+                              "Guruhni spam va reklamadan tozalashim uchun meni admin qiling.")
+    caption = (f"👋 Salom, <b>{html.escape(m.from_user.first_name or '')}</b>!\n\n"
+               "Men <b>Forward Ai</b> — FORWARD® aqlli yordamchisi.\n"
+               "Savolga javob beraman, rasm chizaman, ovoz va hujjatlarni tushunaman, tarjima qilaman.\n\n"
+               "Qayerdan boshlaymiz? 👇")
+    try:
+        msg = await m.answer_animation(media("welcome.mp4"), caption=caption, parse_mode="HTML", reply_markup=welcome_kb())
+        remember("welcome.mp4", msg)
+    except Exception as e:
+        log.warning("welcome anim: %s", e)
+        await m.answer(caption, parse_mode="HTML", reply_markup=welcome_kb())
+    await m.answer("Pastdagi menyudan rejim tanlashingiz mumkin 👇", reply_markup=MENU)
+
+
+@dp.callback_query(F.data.startswith("tour:"))
+async def tour(c: CallbackQuery):
+    arg = c.data.split(":")[1]
+    if arg == "done":
+        await c.answer("Omad! 🚀")
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        return await c.message.answer("Savolingizni yozing yoki menyudan rejim tanlang 👇", reply_markup=MENU)
+    i = max(0, min(int(arg), len(TOUR) - 1))
+    name, text = TOUR[i]
+    await c.answer()
+    if c.message.photo:  # tanishuv ichida — rasmni almashtiramiz
+        try:
+            msg = await c.message.edit_media(InputMediaPhoto(media=media(name), caption=text, parse_mode="HTML"),
+                                             reply_markup=tour_kb(i))
+            if isinstance(msg, Message):
+                remember(name, msg)
+            return
+        except TelegramBadRequest as e:
+            if "not modified" in str(e):
+                return
+    msg = await c.message.answer_photo(media(name), caption=text, parse_mode="HTML", reply_markup=tour_kb(i))
+    remember(name, msg)
+
+
+@dp.callback_query(F.data.startswith("try:"))
+async def try_feature(c: CallbackQuery):
+    await get_user(c.from_user)
+    await c.answer()
+    if c.data == "try:img":
+        await set_mode(c.from_user.id, "image")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🎨 {p}", callback_data=f"img:{k}")]
+                                                   for k, p in enumerate(SAMPLE_IMG)])
+        return await c.message.answer("🎨 Rasm rejimi yoqildi. Qanday rasm kerak? Yozing yoki misolni bosing:", reply_markup=kb)
+    await set_mode(c.from_user.id, "assistant")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"💬 {q}", callback_data=f"ask:{k}")]
+                                               for k, q in enumerate(SAMPLE_Q)])
+    await c.message.answer("💬 Istalgan savolni yozing yoki misolni bosing:", reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("ask:"))
+async def ask_sample(c: CallbackQuery):
+    await c.answer()
+    q = SAMPLE_Q[int(c.data.split(":")[1]) % len(SAMPLE_Q)]
+    m = c.message
+    u = await get_user(c.from_user)
+    if over_limit(u, c.from_user):
+        return await m.answer(f"⏳ Bugungi bepul limit ({FREE_LIMIT}) tugadi. ⭐ Premium oling yoki ertaga davom eting.")
+    await m.answer(f"💬 <i>{html.escape(q)}</i>", parse_mode="HTML")
+    mode = "search" if "kurs" in q else ("business" if "post" in q else "assistant")
+    try:
+        async with busy(m.chat.id):
+            answer = await ask_ai(m.chat.id, [q], mode)
+        await use_quota(c.from_user.id)
+        await send_long(m, answer)
+    except Exception as e:
+        log.exception(e)
+        await m.answer(friendly_error(e))
+
+
+@dp.callback_query(F.data.startswith("img:") | (F.data == "redraw"))
+async def img_sample(c: CallbackQuery):
+    await c.answer("🎨 Chizyapman...")
+    if c.data == "redraw":
+        prompt = last_prompt.get(c.message.chat.id) or (c.message.caption or "").replace("🎨", "").strip()
+    else:
+        prompt = SAMPLE_IMG[int(c.data.split(":")[1]) % len(SAMPLE_IMG)]
+    if not prompt:
+        return
+    u = await get_user(c.from_user)
+    if over_limit(u, c.from_user):
+        return await c.message.answer(f"⏳ Bugungi bepul limit ({FREE_LIMIT}) tugadi.")
+    await generate_image(c.message, prompt, user_id=c.from_user.id)
 
 
 @dp.message(Command("help"))
 @dp.message(F.text == BTN_HELP)
 async def help_cmd(m: Message):
-    await m.answer(HELP_TEXT)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📖 Tanishuv", callback_data="tour:0")]])
+    await m.answer(HELP_TEXT, reply_markup=None if is_group(m) else kb)
 
 
 @dp.message(Command("new"))
@@ -458,13 +754,14 @@ async def tts(c: CallbackQuery):
 
 
 async def tts_wav(text: str) -> bytes:
-    resp = await ai.aio.models.generate_content(
+    text = re.sub(r"[*#`_>]", "", text)
+    resp = await asyncio.wait_for(ai.aio.models.generate_content(
         model=TTS_MODEL,
         contents=text[:2500],
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore")))))
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore"))))), 90)
     pcm = resp.candidates[0].content.parts[0].inline_data.data
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -705,6 +1002,70 @@ async def api_invoice(request):
         prices=[LabeledPrice(label="Premium", amount=PREMIUM_STARS)], provider_token="")
     return web.json_response({"link": link})
 
+# ---------- Global xato ushlagich ----------
+@dp.errors()
+async def on_error(ev: ErrorEvent):
+    log.exception("unhandled: %s", ev.exception)
+    try:
+        upd = ev.update
+        chat = None
+        if upd.message:
+            chat = upd.message.chat
+        elif upd.callback_query and upd.callback_query.message:
+            chat = upd.callback_query.message.chat
+        if chat:
+            await bot.send_message(chat.id, "⚠️ Kichik nosozlik bo'ldi, qayta urinib ko'ring.")
+    except Exception:
+        pass
+    return True
+
+
+# ---------- O'z-o'zini tekshirish (faqat egasi uchun) ----------
+async def selftest(request):
+    if not SELFTEST_KEY or request.query.get("key") != SELFTEST_KEY:
+        raise web.HTTPNotFound()
+    res = {}
+
+    async def check(name, coro):
+        t0 = time.monotonic()
+        try:
+            out = await coro
+            res[name] = {"ok": True, "sec": round(time.monotonic() - t0, 2), "out": str(out)[:200]}
+        except Exception as e:
+            res[name] = {"ok": False, "sec": round(time.monotonic() - t0, 2), "err": f"{type(e).__name__}: {str(e)[:300]}"}
+
+    async def chat():
+        return await ask_ai(0, ["2+2 nechaga teng? Bitta son bilan javob ber."], "assistant", hist=[])
+
+    async def search():
+        return await ask_ai(0, ["Bugun O'zbekistonda 1 AQSh dollari necha so'm? Qisqa."], "search", hist=[])
+
+    async def lite():
+        return resp_text(await gemini("Say OK", model=FAST_MODEL, timeout=20))
+
+    async def tts_():
+        return f"{len(await tts_wav('Salom! Men Forward Ai.'))} bayt wav"
+
+    async def image():
+        return f"{len(await fetch_image(await image_url('qizil olma')))} bayt rasm"
+
+    async def db():
+        return await rpc("fai_stats")
+
+    async def tg():
+        me = await bot.get_me()
+        wh = await bot.get_webhook_info()
+        return f"@{me.username} webhook={wh.url} pending={wh.pending_update_count} err={wh.last_error_message}"
+
+    which = request.query.get("only")
+    checks = {"telegram": tg, "database": db, "chat": chat, "search": search, "fast_model": lite,
+              "tts": tts_, "image": image}
+    await asyncio.gather(*(check(k, f()) for k, f in checks.items() if not which or k in which.split(",")))
+    for f in ("welcome.mp4", "tour1.jpg", "tour2.jpg", "tour3.jpg", "tour4.jpg"):
+        res[f"asset_{f}"] = {"ok": (ASSETS / f).exists()}
+    return web.json_response(res)
+
+
 # ---------- Ishga tushirish ----------
 async def on_startup(*_, **__):
     global http
@@ -746,6 +1107,8 @@ def main():
         app = web.Application(client_max_size=25 * 1024 * 1024)
         app.router.add_get("/", lambda r: web.Response(text="FORWARD AI ishlayapti"))
         app.router.add_get("/app", webapp_page)
+        app.router.add_get("/app/mark.png", lambda r: web.FileResponse(WEBAPP_HTML.with_name("mark.png")))
+        app.router.add_get("/selftest", selftest)
         for path, fn in (("me", api_me), ("chat", api_chat), ("image", api_image), ("tts", api_tts), ("invoice", api_invoice)):
             app.router.add_post(f"/api/{path}", fn)
         SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=WEBHOOK_SECRET).register(app, path="/webhook")
