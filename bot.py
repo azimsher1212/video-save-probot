@@ -404,6 +404,10 @@ async def weather(query: str) -> str:
         return await _meteo(query)
     except Exception as e:
         log.info("open-meteo: %s", e)
+    try:
+        return await _metno(query)
+    except Exception as e:
+        log.info("met.no: %s", e)
     low = query.lower()
     city = next((v for k, v in UZ_CITIES.items() if k in low), "Tashkent")
     j = await _get_json(f"https://wttr.in/{urllib.parse.quote(city)}?format=j1&lang=uz", timeout=10)
@@ -413,6 +417,39 @@ async def weather(query: str) -> str:
     for d in j.get("weather", [])[:3]:
         lines.append(f"{d['date']}: {d['mintempC']}…{d['maxtempC']}°C")
     return "\n".join(lines) + " (manba: wttr.in)"
+
+
+CITY_COORDS = {"Tashkent": (41.31, 69.28), "Samarkand": (39.65, 66.96), "Bukhara": (39.77, 64.42),
+               "Andijan": (40.78, 72.34), "Fergana": (40.38, 71.79), "Namangan": (41.0, 71.67),
+               "Karshi": (38.86, 65.79), "Nukus": (42.46, 59.6), "Khiva": (41.38, 60.36), "Urgench": (41.55, 60.63),
+               "Jizzakh": (40.12, 67.84), "Termez": (37.22, 67.28), "Navoi": (40.1, 65.38), "Gulistan": (40.49, 68.78),
+               "Kokand": (40.53, 70.94), "Chirchiq": (41.47, 69.58), "Moscow": (55.75, 37.62), "Dubai": (25.2, 55.27),
+               "Istanbul": (41.01, 28.98), "Seoul": (37.57, 126.98), "Beijing": (39.9, 116.4),
+               "Guangzhou": (23.13, 113.26), "Yiwu": (29.31, 120.08), "Urumqi": (43.83, 87.62)}
+METNO_SYM = {"clearsky": "ochiq osmon", "fair": "asosan ochiq", "partlycloudy": "qisman bulutli", "cloudy": "bulutli",
+             "fog": "tuman", "rain": "yomg'ir", "lightrain": "mayda yomg'ir", "heavyrain": "kuchli yomg'ir",
+             "snow": "qor", "lightsnow": "yengil qor", "sleet": "qor aralash yomg'ir", "rainshowers": "jala"}
+
+
+async def _metno(query: str) -> str:
+    low = query.lower()
+    city = next((v for k, v in UZ_CITIES.items() if k in low), "Tashkent")
+    lat, lon = CITY_COORDS.get(city, CITY_COORDS["Tashkent"])
+    j = await _get_json(f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}", timeout=10)
+    ts = j["properties"]["timeseries"]
+    now = ts[0]
+    det = now["data"]["instant"]["details"]
+    sym = now["data"].get("next_1_hours", now["data"].get("next_6_hours", {})).get("summary", {}).get("symbol_code", "")
+    desc = METNO_SYM.get(sym.split("_")[0], sym)
+    days = {}
+    for t in ts:
+        d = t["time"][:10]
+        days.setdefault(d, []).append(t["data"]["instant"]["details"]["air_temperature"])
+    lines = [f"{city} ob-havosi (hozir, UTC {now['time'][11:16]}): {det['air_temperature']}°C, {desc}, "
+             f"shamol {round(det['wind_speed'] * 3.6)} km/soat, namlik {round(det['relative_humidity'])}%"]
+    for d, temps in list(days.items())[:3]:
+        lines.append(f"{d}: {min(temps)}…{max(temps)}°C")
+    return "\n".join(lines) + " (manba: met.no)"
 
 
 async def _meteo(query: str) -> str:
