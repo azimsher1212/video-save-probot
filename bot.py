@@ -495,7 +495,9 @@ async def live_context(query: str) -> str:
         jobs.append(cbu_rates())
     if re.search(r"ob-?havo|havo|harorat|yomg'ir|qor |weather|погод", low):
         jobs.append(weather(query))
-    jobs += [web_search(query), wiki(query)]
+    jobs.append(wiki(query))
+    if DDG_OK:
+        jobs.append(web_search(query))
     res = await asyncio.gather(*jobs, return_exceptions=True)
     parts = [r for r in res if isinstance(r, str) and r.strip()]
     for r in res:
@@ -505,6 +507,7 @@ async def live_context(query: str) -> str:
 
 
 GROUNDING_BLOCK_UNTIL = 0.0
+DDG_OK = os.getenv("DDG", "0") == "1"  # Render IP'laridan DuckDuckGo bloklangan
 
 
 async def web_search(query: str, n: int = 6) -> str:
@@ -1458,7 +1461,14 @@ async def on_startup(*_, **__):
     except Exception as e:
         log.warning("set name: %s", e)
     async def boot():
+        global IMG_OK
         await asyncio.gather(pick_models(), pick_image_provider())
+        if IMG_OK:  # haqiqiy rasm chizishni sinab ko'ramiz (bepul tarifda "to'lov kerak" qaytishi mumkin)
+            try:
+                await fetch_image(await image_url("blue sky over mountains"))
+            except Exception as e:
+                IMG_OK = False
+                log.warning("Rasm xizmati o'chirildi: %s (POLLINATIONS_KEY kerak)", e)
         if os.getenv("SELFTEST_ON_START") == "1":
             await selftest_on_start()
     asyncio.create_task(boot())
