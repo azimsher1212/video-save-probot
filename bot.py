@@ -1024,6 +1024,10 @@ async def on_error(ev: ErrorEvent):
 async def selftest(request):
     if not SELFTEST_KEY or request.query.get("key") != SELFTEST_KEY:
         raise web.HTTPNotFound()
+    return web.json_response(await run_selftest(request.query.get("only")))
+
+
+async def run_selftest(which: str | None = None) -> dict:
     res = {}
 
     async def check(name, coro):
@@ -1057,13 +1061,22 @@ async def selftest(request):
         wh = await bot.get_webhook_info()
         return f"@{me.username} webhook={wh.url} pending={wh.pending_update_count} err={wh.last_error_message}"
 
-    which = request.query.get("only")
     checks = {"telegram": tg, "database": db, "chat": chat, "search": search, "fast_model": lite,
               "tts": tts_, "image": image}
     await asyncio.gather(*(check(k, f()) for k, f in checks.items() if not which or k in which.split(",")))
     for f in ("welcome.mp4", "tour1.jpg", "tour2.jpg", "tour3.jpg", "tour4.jpg"):
         res[f"asset_{f}"] = {"ok": (ASSETS / f).exists()}
-    return web.json_response(res)
+    return res
+
+
+async def selftest_on_start():
+    await asyncio.sleep(5)
+    try:
+        r = await run_selftest()
+        for k, v in r.items():
+            log.info("SELFTEST %s %s", "OK " if v.get("ok") else "FAIL", f"{k} {v}")
+    except Exception as e:
+        log.warning("SELFTEST crash: %s", e)
 
 
 # ---------- Ishga tushirish ----------
@@ -1081,6 +1094,8 @@ async def on_startup(*_, **__):
         await bot.set_my_description(description="🤖 FORWARD AI Assistant\n\nSavol bering, rasm chizdiring, ovozli xabar, PDF/Word/Excel, video va YouTube havolasini yuboring — hammasini tushunaman.\n\nAdmin: " + ADMIN_CONTACT)
     except Exception as e:
         log.warning("set name: %s", e)
+    if os.getenv("SELFTEST_ON_START") == "1":
+        asyncio.create_task(selftest_on_start())
     if BASE_URL:
         try:
             await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Open", web_app=WebAppInfo(url=f"{BASE_URL}/app")))
