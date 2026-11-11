@@ -273,8 +273,6 @@ def action_kb(url: str, username: str, has_video: bool, has_photo: bool) -> Inli
             links.clear()
         key = uuid.uuid4().hex[:12]
         links[key] = url
-        if has_video:
-            rows.append([InlineKeyboardButton(text="🎶 Musiqasini yuklash (MP3)", callback_data=f"mp3:{key}")])
         if has_photo:
             rows.append([InlineKeyboardButton(text="🖼 Original sifatda (fayl)", callback_data=f"hd:{key}")])
     rows.append([InlineKeyboardButton(text="➕ Botni guruhga qo'shish", url=bot_link(username))])
@@ -769,13 +767,14 @@ async def on_help(m: Message):
         "1️⃣ Ilovada postni oching → <b>Ulashish</b> → <b>Havolani nusxalash</b>\n"
         "2️⃣ Havolani shu yerga yuboring\n"
         "3️⃣ Bir necha soniyada video yoki rasm tayyor ✅\n"
-        "4️⃣ 🎶 tugma bilan musiqasini MP3 qilib oling\n\n"
+        "4️⃣ Musiqasi kerak bo'lsa — videoga javob qilib <code>/mp3</code> yozing\n\n"
         "🔎 <b>Qo'shiq qidirish:</b> shunchaki nomini yozing\n"
         "masalan: <i>Shoxrux Yurak</i>\n\n"
         "🎧 <b>Faqat MP3 (videosiz):</b>\n"
         "• <code>/mp3 havola</code>\n"
         "• yoki havola yonida <b>mp3</b> deb yozing\n"
-        "• yoki havolaga javob qilib <code>/mp3</code> yozing\n\n"
+        "• yoki havolaga/videoga javob qilib <code>/mp3</code> yozing\n"
+        "• yoki video yuborib, izohiga <code>/mp3</code> yozing\n\n"
         "👮 <b>Guruh qo'riqchisi:</b> meni guruhga qo'shib ADMIN qiling — reklama, spam, arabcha "
         "xabarlar, arab botlar, kirdi-chiqdi va so'kinishlardan tozalayman. Sozlash: <code>/himoya</code>\n\n"
         f"❓ Savollar: {ADMIN}"
@@ -1353,8 +1352,69 @@ async def drop_link(m: Message) -> None:
         log.info("Havolani o'chirib bo'lmadi: %s", e)
 
 
+def video_of(msg: Message | None):
+    """Xabardagi video faylni qaytaradi (video, dumaloq video yoki video-hujjat)."""
+    if not msg:
+        return None
+    if msg.video:
+        return msg.video
+    if msg.video_note:
+        return msg.video_note
+    if msg.document and (msg.document.mime_type or "").startswith("video/"):
+        return msg.document
+    return None
+
+
+async def video_to_mp3(m: Message, vid) -> None:
+    """Telegramdagi videodan musiqani ajratib MP3 qilib yuboradi."""
+    me = await m.bot.me()
+    if (getattr(vid, "file_size", 0) or 0) > 20 * 1024 * 1024:
+        await m.reply("⚠️ Video juda katta (20 MB dan ortiq). Havolasini <code>/mp3 havola</code> qilib yuboring.")
+        return
+    key = "vmp3:" + vid.file_unique_id
+    if key in cache:
+        await m.reply_audio(cache[key]["file_id"], caption=cache[key]["cap"])
+        return
+    await react(m, "👌")
+    folder = Path("/tmp") / ("vmp3_" + uuid.uuid4().hex)
+    folder.mkdir(parents=True, exist_ok=True)
+    src, out = folder / "in.mp4", folder / "musiqa.mp3"
+    t0 = time.monotonic()
+    try:
+        await m.bot.download(vid, destination=src)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", str(src), "-vn", "-acodec", "libmp3lame", "-b:a", "192k", str(out),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if not out.exists() or out.stat().st_size == 0:
+            await m.reply("😔 Bu videoda musiqa topilmadi.")
+            track(m.from_user.id if m.from_user else 0, m.chat.type, "Telegram", "mp3", False, time.monotonic() - t0)
+            return
+        cap = f"🎶 Musiqa\n\n📥 @{me.username}"
+        r = await m.reply_audio(FSInputFile(out), caption=cap)
+        cache[key] = {"file_id": r.audio.file_id, "cap": cap}
+        track(m.from_user.id if m.from_user else 0, m.chat.type, "Telegram", "mp3", True, time.monotonic() - t0)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Video→MP3 xato: %s", e)
+        await m.reply("⚠️ Xatolik yuz berdi, qayta urinib ko'ring 🔁")
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@dp.message(F.caption.regexp(MP3_WORD) & (F.video | F.document))
+async def on_video_caption_mp3(m: Message):
+    vid = video_of(m)
+    if vid:
+        await video_to_mp3(m, vid)
+
+
 @dp.message(Command("mp3"))
 async def on_mp3_command(m: Message):
+    vid = video_of(m.reply_to_message)
+    if vid and not URL_RE.search(m.text or ""):
+        await video_to_mp3(m, vid)
+        return
     found = URL_RE.search(m.text or "")
     if not found and m.reply_to_message:
         found = URL_RE.search(m.reply_to_message.text or m.reply_to_message.caption or "")
