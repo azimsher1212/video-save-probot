@@ -1473,7 +1473,7 @@ async def on_link(m: Message):
             cache.pop(key, None)
 
     emoji = SITE_EMOJI.get(site, "🌐")
-    status = await m.reply(f"{emoji} <b>{site}</b> havolasi qabul qilindi\n⏳ Yuklanmoqda...")
+    status = await m.reply("⏳ Yuklanmoqda...")
     stop = asyncio.Event()
     typing = asyncio.create_task(keep_action(m.bot, m.chat.id, ChatAction.UPLOAD_VIDEO, stop))
     folder = None
@@ -1506,7 +1506,7 @@ async def on_link(m: Message):
                     )
                 return
 
-            await set_status(status, f"{emoji} <b>{site}</b>\n📤 Yuborilmoqda...")
+            await set_status(status, "📤 Yuborilmoqda...")
             items = []
             for f in files:
                 ext = f.suffix.lower()
