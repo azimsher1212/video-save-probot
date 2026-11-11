@@ -260,10 +260,7 @@ async def download(url: str, site: str, audio: bool = False) -> tuple[Path, dict
 
 
 def build_caption(site: str, info: dict, username: str, seconds: float | None) -> str:
-    title = (info.get("title") or info.get("description") or "").strip().split("\n")[0]
-    if title and title.lower() not in {"video", "pin", "instagram", "tiktok"} and not title.startswith("http"):
-        return f"<b>{html.escape(title[:100])}</b>\n\n📥 @{username}"
-    return f"📥 @{username}"
+    return f"@{username}"
 
 
 def action_kb(url: str, username: str, has_video: bool, has_photo: bool) -> InlineKeyboardMarkup:
@@ -275,8 +272,7 @@ def action_kb(url: str, username: str, has_video: bool, has_photo: bool) -> Inli
         links[key] = url
         if has_photo:
             rows.append([InlineKeyboardButton(text="🖼 Original sifatda (fayl)", callback_data=f"hd:{key}")])
-    rows.append([InlineKeyboardButton(text="➕ Botni guruhga qo'shish", url=bot_link(username))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 async def react(m: Message, emoji: str) -> None:
@@ -337,7 +333,8 @@ async def send_items(m: Message, items: list[tuple[str, object]], cap: str, kb) 
             msgs = await m.reply_media_group(group.build())
             for r in msgs:
                 out.append(("video", r.video.file_id) if r.video else ("photo", r.photo[-1].file_id))
-        await m.answer("👆 Tayyor! Yana nima qilamiz?", reply_markup=kb)
+        if kb:
+            await m.answer("👆", reply_markup=kb)
 
     for _, media in audios:
         r = await m.reply_audio(media, caption=cap)
@@ -1373,7 +1370,7 @@ async def video_to_mp3(m: Message, vid) -> None:
         return
     key = "vmp3:" + vid.file_unique_id
     if key in cache:
-        await m.reply_audio(cache[key]["file_id"], caption=cache[key]["cap"])
+        await m.reply_audio(cache[key]["file_id"], caption=f"@{me.username}")
         return
     await react(m, "👌")
     folder = Path("/tmp") / ("vmp3_" + uuid.uuid4().hex)
@@ -1391,7 +1388,7 @@ async def video_to_mp3(m: Message, vid) -> None:
             await m.reply("😔 Bu videoda musiqa topilmadi.")
             track(m.from_user.id if m.from_user else 0, m.chat.type, "Telegram", "mp3", False, time.monotonic() - t0)
             return
-        cap = f"🎶 Musiqa\n\n📥 @{me.username}"
+        cap = f"@{me.username}"
         r = await m.reply_audio(FSInputFile(out), caption=cap)
         cache[key] = {"file_id": r.audio.file_id, "cap": cap}
         track(m.from_user.id if m.from_user else 0, m.chat.type, "Telegram", "mp3", True, time.monotonic() - t0)
@@ -1467,7 +1464,7 @@ async def on_link(m: Message):
         c = cache[key]
         kinds = {k for k, _ in c["items"]}
         try:
-            await send_items(m, c["items"], c["cap"], action_kb(url, me.username, "video" in kinds, "photo" in kinds))
+            await send_items(m, c["items"], f"@{me.username}", action_kb(url, me.username, "video" in kinds, "photo" in kinds))
             track(m.from_user.id if m.from_user else 0, m.chat.type, site, "kesh", True, 0)
             await drop_link(m)
             return
@@ -1559,7 +1556,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
     send = target.reply_audio if reply else target.answer_audio
 
     if key in cache:
-        await send(cache[key]["file_id"], caption=cache[key].get("cap") or f"🎶 Musiqa\n\n📥 @{me.username}")
+        await send(cache[key]["file_id"], caption=f"@{me.username}")
         return True
 
     stop = asyncio.Event()
@@ -1574,7 +1571,7 @@ async def deliver_mp3(target: Message, url: str, reply: bool = False, user_id: i
         if audios:
             title = html.escape((info.get("title") or "Musiqa")[:100])
             author = info.get("uploader") or info.get("channel")
-            cap = f"🎶 <b>{title}</b>\n\n📥 @{me.username}"
+            cap = f"@{me.username}"
             r = await send(
                 FSInputFile(audios[0]),
                 title=info.get("title"),
@@ -1630,7 +1627,7 @@ async def on_hd(c: CallbackQuery):
         for n, img in enumerate(images[:10]):
             r = await c.message.answer_document(
                 FSInputFile(img),
-                caption=f"🖼 Original sifat • {SITE_EMOJI.get(site, '🌐')} {site}\n\n📥 @{me.username}" if n == 0 else None,
+                caption=f"@{me.username}" if n == 0 else None,
             )
             ids.append(r.document.file_id)
         cache[key] = {"file_ids": ids}
