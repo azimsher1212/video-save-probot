@@ -1221,6 +1221,10 @@ class Guard(BaseMiddleware):
             text = m.text or m.caption or ""
             if text.startswith("/"):
                 return await handler(event, data)
+            # Video/rasm havolasi (Instagram, TikTok, YouTube...) — har doim yuklab beriladi
+            link = URL_RE.search(text)
+            if link and detect_site(link.group(0)):
+                return await handler(event, data)
 
             swear = bool(text) and is_swear(text)
             arab = bool(text) and has_arabic(text)
